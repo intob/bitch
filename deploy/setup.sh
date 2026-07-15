@@ -15,7 +15,13 @@ GO_VERSION="${GO_VERSION:-1.26.3}"
 # and flags. Upgrade deliberately (bump here, rebuild, retest) — never track
 # npm latest. The bridge preflights `claude --version` at boot.
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.210}"
-ARCH="arm64"                              # CAX is ARM (§5)
+# Go release arch, auto-detected from the box (CAX=arm64, CX/CPX=amd64, §5).
+# Override with ARCH=… if needed.
+case "${ARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}" in
+    arm64|aarch64) ARCH="arm64" ;;
+    amd64|x86_64)  ARCH="amd64" ;;
+    *) echo "unsupported arch: ${ARCH:-unknown}"; exit 1 ;;
+esac
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
