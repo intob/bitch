@@ -10,7 +10,7 @@ your phone even while the laptop travels and goes offline.
 
 ## What it is
 
-- One Claude agent, headless, hosted on an always-on Hetzner VPS (systemd).
+- One Claude agent, headless, written in **Go**, hosted on an always-on Hetzner VPS (systemd).
 - Reachable via a Telegram bot; only an allowlisted user ID can drive it.
 - No inbound ports — the bridge long-polls Telegram (outbound HTTPS only).
 - Permission tiers from advisory → constrained → full autonomy (§4 of the design).
