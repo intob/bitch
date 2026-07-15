@@ -1,0 +1,28 @@
+# Secrets — never commit the bot token or anything with credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Runtime / session state
+*.sqlite
+*.sqlite3
+*.db
+data/
+sessions/
+
+# Logs
+*.log
+logs/
+
+# Dependencies / build
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
