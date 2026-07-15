@@ -135,10 +135,15 @@ Either way, "constrained now, open later" is a config change, not a rewrite.
   token ceiling the model paces itself against) per agentic run (§9.1).
 
 ### 4.5 Host hardening (it's a public cloud box)
-- SSH **key-only**, password auth disabled, root login disabled; run the bridge
-  as a **non-root user** (see §4.6).
-- **Firewall** (Hetzner Cloud Firewall + `ufw`): inbound limited to SSH from
-  your IP(s); no inbound app ports (long-poll is outbound). Everything else denied.
+- SSH **key-only**, password auth disabled. SSH root *login* stays disabled even
+  though the agent runs as root locally (§4.6) — you SSH in as a separate admin
+  user.
+- **Firewall — lean on the Hetzner Cloud Firewall, not just `ufw`.** It's
+  enforced *outside* the VM, so a root-level compromise inside the box can flush
+  `ufw` but cannot touch it. Inbound limited to SSH from your IP(s); no inbound
+  app ports (long-poll is outbound). Set **egress limits here too** — with the
+  agent running as root, this is your best remaining control on where a
+  compromised process can reach out.
 - `fail2ban` + unattended security upgrades.
 - **Git credentials for all repos + future self-hosted Git.** Decided: credentials
   are provisioned explicitly on the box. Recommended shape — a dedicated
@@ -150,19 +155,25 @@ Either way, "constrained now, open later" is a config change, not a rewrite.
 - **Blast-radius upside:** no Keychain, no personal `~/.ssh`, no personal files —
   worst case is a rebuildable VM. This is why T2/T3 become reasonable sooner here.
 
-### 4.6 Root vs non-root (decision pending)
-Running the agent **as root collapses several containment layers at once** — the
-workdir jail, the command denylist, and secret isolation all rely on normal file
-permissions, and root walks through all of them (it can read the token
-`EnvironmentFile`, rewrite the systemd unit, disable the firewall). The
-disposable-VPS argument softens the *cost* of a compromise but does not justify
-making one trivial and total.
+### 4.6 Privilege posture — **decided: full root**
+Running as root **collapses the OS-level containment layers** — the workdir jail,
+the command denylist, and secret isolation all rely on file permissions, and root
+walks through all of them (it can read the token `EnvironmentFile`, rewrite the
+systemd unit, flush `ufw`). This is a deliberate, eyes-open choice for
+convenience; the disposable-VPS model bounds the *cost* of a compromise to a
+rebuildable box.
 
-**Recommended default:** run as a dedicated **non-root user** with a curated
-`NOPASSWD` **sudo allowlist** for the few operations that genuinely need it
-(package installs, service restarts). Keeps the convenience of root for the
-handful of privileged tasks while leaving every containment layer meaningful.
-Full root remains an option you can choose with eyes open — see §12.
+Because the OS layers no longer contain anything, the **compensating controls
+carry the weight** — treat these as load-bearing, not optional:
+- **The permission gate is now the primary boundary.** Under Path B (§9.2) Claude
+  Code evaluates its permission profile *before* executing a tool, independent of
+  the OS user — so tiers still work. Keep **T1 (constrained)** the operating tier
+  longer than you otherwise would; only the Telegram approval hook stands between
+  a risky tool call and root execution.
+- **Hetzner Cloud Firewall for egress** (§4.5) — enforced outside the VM, so root
+  can't disable it. This is the one control root can't defeat.
+- **Disposable box** (§4.5) — rebuild on any suspicion; keep nothing on it that
+  isn't reproducible from a script.
 
 ---
 
@@ -219,7 +230,7 @@ works regardless of where you (or the laptop) are.
 ## 8. Process lifecycle
 
 - Run as a **systemd service** (`/etc/systemd/system/bitch.service`):
-  `Restart=always`, `WantedBy=multi-user.target`. Dedicated non-root user.
+  `Restart=always`, `WantedBy=multi-user.target`. Runs as **root** (§4.6).
 - Secrets injected via `EnvironmentFile=` (root-owned, `chmod 600`).
 - **Logging** to `journald` (`journalctl -u bitch`).
 - On crash/restart, in-flight Telegram updates are re-fetched; a partially
@@ -248,18 +259,17 @@ a `toolrunner` helper). So the agent core is one of two paths (§9.2).
   per-session config, so switching is trivial.
 - Pair Opus with the budget guard (§4.4) — Opus + agentic loops burn tokens.
 
-### 9.2 Go implementation paths (decision pending — §12)
-- **Path B — Go bridge orchestrates the Claude Code CLI (recommended).** Go owns
-  Telegram + process lifecycle; it spawns
-  `claude -p --output-format stream-json --resume …`. Claude Code brings the
-  maintained harness: built-in tools, sessions, MCP, and a real permission
-  system. Tiers = permission profiles; approvals = a `PreToolUse` hook that calls
-  back into the bridge → Telegram. Least reinvention; reuses Anthropic's
-  security-critical tooling. Bridge logic is still all Go.
-- **Path A — pure Go with `anthropic-sdk-go`.** Define bash/read/write/edit as Go
-  functions, run the loop with the `toolrunner` helper, gate inside each tool
-  function. Maximum control, minimal deps, naturally small tool surface — but
-  **you own the security-critical bash/file plumbing** (path jail, denylist).
+### 9.2 Go implementation path — **chosen: Path B**
+- **Path B — Go bridge orchestrates the Claude Code CLI.** Go owns Telegram +
+  process lifecycle; it spawns `claude -p --output-format stream-json --resume …`.
+  Claude Code brings the maintained harness: built-in tools, sessions, MCP, and a
+  real permission system. Tiers = permission profiles; approvals = a `PreToolUse`
+  hook that calls back into the bridge → Telegram. Reuses Anthropic's
+  security-critical tooling; bridge logic is all Go. This path's permission gate
+  is also what makes the full-root posture (§4.6) tolerable — it's the boundary
+  that survives root.
+- *(Not chosen)* **Path A — pure Go with `anthropic-sdk-go`.** Self-defined tools
+  + gating; more control but you'd own the bash/file plumbing and its security.
 
 ---
 
@@ -274,7 +284,7 @@ a `toolrunner` helper). So the agent core is one of two paths (§9.2).
 | Bridge crash | systemd `Restart=always`; interrupted turn reported |
 | Prompt injection via fetched content | Tier + denylist + workdir jail; disposable-box isolation as backstop |
 | Unknown user messages bot | Dropped by user-ID gate |
-| Box compromised | Rebuild from setup script; non-root + scoped creds limit reach |
+| Box compromised | In-box reach is total (root); cloud firewall bounds egress, scoped creds bound Git reach, rebuild from script |
 
 ---
 
@@ -310,20 +320,20 @@ Prove the single agent first; add roles as a layer, not a rewrite.
   credentials provisioned explicitly (machine user or fine-grained PAT).
 - **Working-dir root:** clone real repos onto the box under a jailed root.
 
-**Still to confirm:**
-1. **Go implementation path:** B (orchestrate Claude Code CLI — recommended) vs
-   A (pure `anthropic-sdk-go` with self-built tools)? §9.2
-2. **Privilege posture:** non-root + scoped `NOPASSWD` sudo (recommended) vs full
-   root? §4.6
-3. **Telegram surface:** start 1:1 (recommended, group-ready) vs a group from day
-   one? §11
+- **Go implementation path:** Path B — orchestrate the Claude Code CLI. §9.2
+- **Privilege posture:** full root, with the permission gate + Hetzner Cloud
+  Firewall + disposable-box model as the compensating controls. §4.6
+- **Telegram surface:** start 1:1 private chat; routing built group-ready. §11
+
+All primary decisions are resolved — the doc is ready to build against.
 
 ---
 
 ## 13. Suggested build phases
 
-1. **Provision & harden** — spin up the Hetzner CAX21 box, SSH key-only,
-   firewall, non-root user, Go + toolchains. (§4.5, §4.6, §5)
+1. **Provision & harden** — spin up the Hetzner CAX21 box, SSH key-only (admin
+   user for SSH), Hetzner Cloud Firewall with egress limits, Go + toolchains.
+   (§4.5, §4.6, §5)
 2. **Skeleton** — Go bot + user-ID gate + echo. Prove the transport and that only
    you can drive it.
 3. **Agent wired in (T0 advisory)** — read-only Claude answering in-chat, with
