@@ -1,0 +1,38 @@
+# bitch — systemd unit (DESIGN.md §8).
+# Install to /etc/systemd/system/bitch.service, then:
+#   systemctl daemon-reload && systemctl enable --now bitch
+# Logs: journalctl -u bitch -f
+[Unit]
+Description=bitch — Telegram to Claude Code bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Full-root posture is a deliberate, eyes-open choice (§4.6). The compensating
+# controls (permission gate, Hetzner Cloud Firewall egress, disposable box)
+# carry the weight — see the design doc.
+User=root
+WorkingDirectory=/opt/bitch
+
+# Secrets live outside git, root-owned, chmod 600 (§4.2, §8).
+EnvironmentFile=/etc/bitch/bitch.env
+
+# claude + node must be on PATH; set BITCH_CLAUDE_BIN to an absolute path in the
+# env file if the CLI lives somewhere unusual.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin
+
+ExecStart=/opt/bitch/bitch serve
+
+# Survive reboots and crashes; the bridge re-fetches queued updates on restart
+# and resumes sessions (§8, §10).
+Restart=always
+RestartSec=3
+
+# Logging to journald (§8).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bitch
+
+[Install]
+WantedBy=multi-user.target

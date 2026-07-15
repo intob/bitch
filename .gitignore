@@ -26,3 +26,7 @@ venv/
 
 # macOS
 .DS_Store
+
+# Go workspace (developer-local)
+go.work
+go.work.sum
