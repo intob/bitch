@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/intob/bitch/internal/config"
 )
@@ -44,6 +46,8 @@ type RunRequest struct {
 	Prompt          string
 	WorkDir         string
 	ClaudeSessionID string // empty ⇒ start a fresh session with a new UUID
+	Model           string // empty ⇒ config default (§9.1)
+	Effort          string // empty ⇒ config default (§9.1)
 }
 
 // Result is the outcome of a completed turn (from the terminal `result` event).
@@ -74,16 +78,26 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 		sessionID = newUUID()
 	}
 
+	// Per-session model/effort override the config default when set (§9.1).
+	model := req.Model
+	if model == "" {
+		model = r.cfg.Model
+	}
+	effort := req.Effort
+	if effort == "" {
+		effort = r.cfg.Effort
+	}
+
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose", // required for stream-json in print mode
-		"--model", r.cfg.Model,
+		"--model", model,
 		"--permission-mode", "default", // the hook is authoritative (§4.6)
 		"--settings", r.settingsPath,
 	}
-	if r.cfg.EffortFlag() != "" {
-		args = append(args, "--effort", r.cfg.EffortFlag())
+	if ef := config.NormalizeEffort(effort); ef != "" {
+		args = append(args, "--effort", ef)
 	}
 	if fresh {
 		args = append(args, "--session-id", sessionID)
@@ -98,19 +112,23 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = req.WorkDir
-	// Propagate the loopback approval endpoint + secret into the child so the
-	// PreToolUse hook (which inherits this env) can call back into the bridge.
-	cmd.Env = append(os.Environ(),
-		"BITCH_HOOK_ADDR="+r.cfg.HookAddr,
-		"BITCH_HOOK_SECRET="+r.cfg.HookSecret,
-	)
+	cmd.Env = r.childEnv()
+	// Put claude in its own process group and kill the whole group on cancel:
+	// tool children (test runs, builds) must die with it, or /stop leaves them
+	// running as root (§6). WaitDelay unblocks Wait if a straggler holds the
+	// stdout pipe open after the kill.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 10 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("agent: stdout pipe: %w", err)
 	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	stderr := &tailBuffer{max: 4096}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("agent: start claude: %w", err)
@@ -199,6 +217,65 @@ func (r *Runner) dispatch(ev streamEvent, cb Callbacks, result *Result) {
 		}
 	}
 }
+
+// Preflight verifies the claude CLI is present and answers, returning its
+// version string. Run at startup so a PATH problem or a breaking CLI upgrade
+// fails the boot loudly instead of failing the first turn — the stream-json
+// shapes, hook contract, and flags we use are all version-coupled (§9.2).
+func (r *Runner) Preflight(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, r.cfg.ClaudeBin, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("agent: claude CLI preflight (%s --version): %w: %s",
+			r.cfg.ClaudeBin, err, tail(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// childEnv builds the claude process environment from scratch rather than
+// inheriting the bridge's. The bridge env holds secrets the agent must not see
+// — BITCH_TELEGRAM_TOKEN above all (a safe-listed `env` would print them into
+// the transcript, §4.6). The child gets: base process vars, ANTHROPIC_*/
+// CLAUDE_* for auth and CLI config, and the hook callback endpoint.
+func (r *Runner) childEnv() []string {
+	env := []string{
+		"BITCH_HOOK_ADDR=" + r.cfg.HookAddr,
+		"BITCH_HOOK_SECRET=" + r.cfg.HookSecret,
+	}
+	base := map[string]bool{
+		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
+		"SHELL": true, "TMPDIR": true, "LANG": true, "LC_ALL": true,
+		"TERM": true, "TZ": true,
+	}
+	for _, kv := range os.Environ() {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if base[k] || strings.HasPrefix(k, "ANTHROPIC_") || strings.HasPrefix(k, "CLAUDE_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// tailBuffer keeps only the last max bytes written. stderr can balloon on a
+// pathological run, and only the tail is ever reported.
+type tailBuffer struct {
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.b) }
 
 // --- stream-json event shapes -------------------------------------------
 

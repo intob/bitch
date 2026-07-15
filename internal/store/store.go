@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,8 @@ type Session struct {
 	WorkDir         string // current working directory (within the jail)
 	Tier            int    // current permission tier 0..3
 	ClaudeSessionID string // Claude Code session id to --resume; empty = fresh
+	Model           string // per-session model override; empty = config default (§9.1)
+	Effort          string // per-session effort override; empty = config default (§9.1)
 	UpdatedAt       time.Time
 }
 
@@ -68,6 +71,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     workdir           TEXT    NOT NULL,
     tier              INTEGER NOT NULL,
     claude_session_id TEXT    NOT NULL DEFAULT '',
+    model             TEXT    NOT NULL DEFAULT '',
+    effort            TEXT    NOT NULL DEFAULT '',
     updated_at        INTEGER NOT NULL,
     PRIMARY KEY (chat_id, thread_id, bot_id)
 );
@@ -77,9 +82,19 @@ CREATE TABLE IF NOT EXISTS spend (
     day INTEGER NOT NULL PRIMARY KEY, -- days since epoch, UTC
     usd REAL    NOT NULL
 );`
-	_, err := s.db.Exec(schema)
-	if err != nil {
+	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
+	}
+	// Add per-session model/effort to databases created before they existed.
+	// Fresh DBs already have the columns (above); a duplicate-column error here
+	// just means we've already migrated, so it's ignored.
+	for _, stmt := range []string{
+		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("store: migrate columns: %w", err)
+		}
 	}
 	return nil
 }
@@ -90,7 +105,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // Get returns the session for key, or (nil, nil) if none exists yet.
 func (s *Store) Get(k Key) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT workdir, tier, claude_session_id, updated_at FROM sessions
+		`SELECT workdir, tier, claude_session_id, model, effort, updated_at FROM sessions
          WHERE chat_id=? AND thread_id=? AND bot_id=?`,
 		k.ChatID, k.ThreadID, k.BotID)
 	var (
@@ -98,7 +113,7 @@ func (s *Store) Get(k Key) (*Session, error) {
 		ts   int64
 	)
 	sess.Key = k
-	err := row.Scan(&sess.WorkDir, &sess.Tier, &sess.ClaudeSessionID, &ts)
+	err := row.Scan(&sess.WorkDir, &sess.Tier, &sess.ClaudeSessionID, &sess.Model, &sess.Effort, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -117,14 +132,14 @@ func (s *Store) GetByClaudeSession(claudeID string) (*Session, error) {
 		return nil, nil
 	}
 	row := s.db.QueryRow(
-		`SELECT chat_id, thread_id, bot_id, workdir, tier, updated_at FROM sessions
+		`SELECT chat_id, thread_id, bot_id, workdir, tier, model, effort, updated_at FROM sessions
          WHERE claude_session_id=? LIMIT 1`, claudeID)
 	var (
 		sess Session
 		ts   int64
 	)
 	sess.ClaudeSessionID = claudeID
-	err := row.Scan(&sess.ChatID, &sess.ThreadID, &sess.BotID, &sess.WorkDir, &sess.Tier, &ts)
+	err := row.Scan(&sess.ChatID, &sess.ThreadID, &sess.BotID, &sess.WorkDir, &sess.Tier, &sess.Model, &sess.Effort, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -140,15 +155,17 @@ func (s *Store) Upsert(sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (chat_id, thread_id, bot_id, workdir, tier, claude_session_id, updated_at)
-         VALUES (?,?,?,?,?,?,?)
+		`INSERT INTO sessions (chat_id, thread_id, bot_id, workdir, tier, claude_session_id, model, effort, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)
          ON CONFLICT(chat_id, thread_id, bot_id) DO UPDATE SET
              workdir=excluded.workdir,
              tier=excluded.tier,
              claude_session_id=excluded.claude_session_id,
+             model=excluded.model,
+             effort=excluded.effort,
              updated_at=excluded.updated_at`,
 		sess.ChatID, sess.ThreadID, sess.BotID, sess.WorkDir, sess.Tier,
-		sess.ClaudeSessionID, time.Now().Unix())
+		sess.ClaudeSessionID, sess.Model, sess.Effort, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("store: upsert: %w", err)
 	}

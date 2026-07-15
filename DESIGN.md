@@ -122,11 +122,36 @@ Either way, "constrained now, open later" is a config change, not a rewrite.
 
 - "**ask over Telegram**" sends you the exact command/diff and blocks until you
   reply ✅ / ❌ (inline keyboard buttons). A pending request times out to **deny**.
-- **Working directory jail:** edits/reads confined to a configured root. Path
-  traversal outside it is denied regardless of tier.
-- **Command denylist** at every tier below T3: `rm -rf`, disk ops, `curl … | sh`,
-  reads of credential files (`~/.ssh`, token env), `sudo`. Always ask or deny.
-- **Prompt-injection is a first-class threat.** Tier + denylist + workdir jail
+- **Working directory jail:** edits/reads confined to a configured root,
+  compared on **physical paths** — symlinks are resolved on both the roots and
+  the target, so a link inside the jail can't launder a target outside it.
+  Path traversal outside is denied regardless of tier.
+- **The bash gate** (`internal/policy`) below T3 is three layers, each failing
+  toward *ask*:
+  1. a **denylist** of destructive / credential / network-write patterns
+     (`rm -rf`, disk ops, `curl … | sh`, `git push`, `~/.ssh` **and**
+     `/root/.ssh` — the agent's HOME is /root — `/etc/bitch`, firewall and
+     service tools, `find -delete/-exec`) that scans the **whole command
+     string**, so badness embedded in the arguments of a safe leading command
+     is still caught;
+  2. a deliberately small **allowlist**: inert utilities plus read-only VCS /
+     toolchain **subcommands** (`git status|diff|log|fetch…`,
+     `go build|test|vet…`, `npm test|run`, `pytest`, `make`). Interpreters
+     with inline code (`python -c`, `node -e`, `awk`), network installers
+     (`npx`, `pip install`, `npm install`), `env` (would print secrets),
+     `sed` (`-i` writes arbitrary paths), and any command containing **file
+     redirection** (`>`) or **command substitution** (`$(…)`, backticks) all
+     go to ask;
+  3. everything unrecognized **asks**.
+- **What the gate deliberately does not stop:** running code that lives in the
+  workdir (`go test`, `npm test`, `make`). An agent allowed to edit files and
+  run tests can always smuggle behavior into the code it runs — that is
+  inherent to a useful coding agent, not a hole. The gate's job is to close
+  the **zero-footprint escapes** (inline interpreter code,
+  network-fetch-and-run), so that going off-script requires either a human ✅
+  or a visible artifact in the diff. The residual risk is carried by the
+  egress firewall and the disposable box (§4.5).
+- **Prompt-injection is a first-class threat.** Tier + gate + workdir jail
   contain it; the disposable-box isolation (§4.5) is the backstop.
 
 ### 4.4 Cost / runaway guard
@@ -169,7 +194,13 @@ carry the weight** — treat these as load-bearing, not optional:
   Code evaluates its permission profile *before* executing a tool, independent of
   the OS user — so tiers still work. Keep **T1 (constrained)** the operating tier
   longer than you otherwise would; only the Telegram approval hook stands between
-  a risky tool call and root execution.
+  a risky tool call and root execution. Be honest about what "boundary" means
+  here: the gate closes the zero-footprint escapes (§4.3) — it cannot stop an
+  agent that is allowed to write and run workdir code from putting anything it
+  likes *in* that code. That residual is bounded by the two controls below.
+- **The agent's environment is scrubbed.** The claude process (and every tool
+  it runs) gets a from-scratch env: base vars, `ANTHROPIC_*`/`CLAUDE_*`, and
+  the hook endpoint — never the Telegram token or the bridge's own config.
 - **Hetzner Cloud Firewall for egress** (§4.5) — enforced outside the VM, so root
   can't disable it. This is the one control root can't defeat.
 - **Disposable box** (§4.5) — rebuild on any suspicion; keep nothing on it that
@@ -204,11 +235,15 @@ works regardless of where you (or the laptop) are.
 
 - **Map each Telegram chat/thread → one persisted Claude session.** Follow-ups
   resume that session so context carries across messages; not one-shots.
-- Small persistent store (SQLite or a JSON file) holds
-  `(chat_id, thread_id, bot_id) → session_id`, working dir, and current tier —
-  keyed group-ready from day one (§11) so the multi-agent move is additive.
+- Small persistent store (SQLite) holds
+  `(chat_id, thread_id, bot_id) → session_id`, working dir, current tier, and
+  per-session model/effort overrides — keyed group-ready from day one (§11) so
+  the multi-agent move is additive.
 - **Control commands:** `/new [dir]`, `/stop`, `/tier <0-3>` (with confirm),
-  `/cd <path>` (within allowed roots), `/status` (session, dir, tier, spend).
+  `/model <name>`, `/effort <level>`, `/cd <path>` (within allowed roots),
+  `/status` (session, dir, tier, model, effort, spend). `/model` and `/effort`
+  set per-session overrides (empty ⇒ the config default) and take effect on the
+  next turn.
 
 ---
 
@@ -256,7 +291,8 @@ a `toolrunner` helper). So the agent core is one of two paths (§9.2).
   `xhigh` for heavy coding/agentic tasks, `max` when correctness must beat cost).
 - **Develop the plumbing on a cheaper model** (Haiku 4.5 / Sonnet 5) — validating
   transport, gating, and sessions doesn't need Opus. Model + effort are
-  per-session config, so switching is trivial.
+  per-session state: `BITCH_MODEL`/`BITCH_EFFORT` set the default and `/model`
+  `/effort` override it live per chat, so switching is trivial. *(Implemented.)*
 - Pair Opus with the budget guard (§4.4) — Opus + agentic loops burn tokens.
 
 ### 9.2 Go implementation path — **chosen: Path B**
@@ -268,6 +304,13 @@ a `toolrunner` helper). So the agent core is one of two paths (§9.2).
   security-critical tooling; bridge logic is all Go. This path's permission gate
   is also what makes the full-root posture (§4.6) tolerable — it's the boundary
   that survives root.
+- **The CLI is a version-coupled dependency, so it is pinned.** The bridge
+  depends on the CLI's `stream-json` event shapes, the PreToolUse stdin/stdout
+  hook contract, and specific flags (`--session-id`, `--resume`, `--effort`,
+  `--settings`). `deploy/setup.sh` installs a **pinned version**
+  (`CLAUDE_VERSION`); upgrades are deliberate: bump the pin, rebuild, retest.
+  The bridge **preflights** `claude --version` at boot so a missing or drifted
+  binary fails startup loudly, not mid-turn.
 - *(Not chosen)* **Path A — pure Go with `anthropic-sdk-go`.** Self-defined tools
   + gating; more control but you'd own the bash/file plumbing and its security.
 
@@ -333,12 +376,13 @@ All primary decisions are resolved — the doc is ready to build against.
 
 1. **Provision & harden** — spin up the Hetzner CAX21 box, SSH key-only (admin
    user for SSH), Hetzner Cloud Firewall with egress limits, Go + toolchains.
-   (§4.5, §4.6, §5)
+   (§4.5, §4.6, §5) — *planned in DEPLOY.md, pending secrets.*
 2. **Skeleton** — Go bot + user-ID gate + echo. Prove the transport and that only
-   you can drive it.
+   you can drive it. — **done**
 3. **Agent wired in (T0 advisory)** — read-only Claude answering in-chat, with
-   session continuity. No write powers. (Chosen path from §9.2.)
+   session continuity. No write powers. (Chosen path from §9.2.) — **done**
 4. **Constrained (T1)** — edits in workdir, safe-bash allowlist, Telegram approval
-   for risky ops.
+   for risky ops. — **done** (reviewed and hardened; see CODE-REVIEW.md)
 5. **Hardening** — systemd service, logging, budget guard, secrets in place.
+   — **done** (deploy artifacts in `deploy/`)
 6. **Later** — additional agents / the pipeline layer (§11).

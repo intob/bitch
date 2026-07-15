@@ -76,13 +76,18 @@ func Load() (*Config, error) {
 		c.AllowedUsers = append(c.AllowedUsers, id)
 	}
 
-	// Roots — the workdir jail. Default to DefaultDir's parent-ish sensible root.
+	// Roots — the workdir jail. Canonicalized (symlinks resolved) because the
+	// policy jail check compares physical paths (§4.3).
 	for _, r := range splitList(os.Getenv("BITCH_ROOTS")) {
 		abs, err := filepath.Abs(r)
 		if err != nil {
 			return nil, fmt.Errorf("BITCH_ROOTS: %q: %w", r, err)
 		}
-		c.Roots = append(c.Roots, filepath.Clean(abs))
+		abs = filepath.Clean(abs)
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = resolved
+		}
+		c.Roots = append(c.Roots, abs)
 	}
 
 	if err := c.validate(); err != nil {
@@ -109,6 +114,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("BITCH_DEFAULT_DIR: %w", err)
 	}
 	c.DefaultDir = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(c.DefaultDir); err == nil {
+		c.DefaultDir = resolved
+	}
 	if !c.WithinRoots(c.DefaultDir) {
 		return fmt.Errorf("BITCH_DEFAULT_DIR %q is not within any BITCH_ROOTS", c.DefaultDir)
 	}
@@ -118,16 +126,21 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// EffortFlag returns the validated effort level to pass to `claude --effort`,
-// or "" if none/invalid (let the CLI default stand). §9.1 defaults to "high".
-func (c *Config) EffortFlag() string {
-	switch c.Effort {
+// NormalizeEffort returns effort if it is a valid `claude --effort` level, else
+// "" (let the CLI default stand). Shared by config validation and the /effort
+// command (§9.1).
+func NormalizeEffort(effort string) string {
+	switch effort {
 	case "low", "medium", "high", "xhigh", "max":
-		return c.Effort
+		return effort
 	default:
 		return ""
 	}
 }
+
+// EffortFlag returns the validated configured effort level, or "" (§9.1
+// defaults to "high").
+func (c *Config) EffortFlag() string { return NormalizeEffort(c.Effort) }
 
 // WithinRoots reports whether an absolute, cleaned path is inside a configured
 // root. This is the load-bearing check behind the workdir jail (§4.3); callers

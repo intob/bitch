@@ -13,7 +13,12 @@ import (
 // unknown session fails closed, and auto allow/deny verdicts resolve without
 // touching Telegram. (The Ask path needs a live bot and is covered manually.)
 func TestDecide(t *testing.T) {
-	root := t.TempDir()
+	// Canonicalize like config.Load does: the policy jail compares physical
+	// paths (macOS TempDir lives behind a /var → /private/var symlink).
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	work := filepath.Join(root, "repo")
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		t.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 
@@ -68,10 +69,23 @@ func New(cfg *config.Config, st *store.Store, exe string) (*Bridge, error) {
 // Run starts the approval server and the Telegram poll loop, blocking until ctx
 // is cancelled.
 func (b *Bridge) Run(ctx context.Context) error {
-	log.Printf("bitch online as @%s (id %d); %d allowed user(s); tier default T%d; model %s",
-		b.bot.Self.UserName, b.botID, len(b.cfg.AllowedUsers), b.cfg.DefaultTier, b.cfg.Model)
+	// CLI smoke check first: the stream-json shapes, hook contract, and flags
+	// are version-coupled, so a missing or drifted claude binary should fail
+	// the boot, not the first turn (§9.2).
+	version, err := b.runner.Preflight(ctx)
+	if err != nil {
+		return err
+	}
+	log.Printf("bitch online as @%s (id %d); %d allowed user(s); tier default T%d; model %s; claude %s",
+		b.bot.Self.UserName, b.botID, len(b.cfg.AllowedUsers), b.cfg.DefaultTier, b.cfg.Model, version)
 
-	go b.serveApprovals(ctx) // loopback callback server for the permission hook
+	// Loopback callback server for the permission hook. Listen synchronously so
+	// a bad HookAddr fails startup instead of dying inside a goroutine.
+	ln, err := net.Listen("tcp", b.cfg.HookAddr)
+	if err != nil {
+		return fmt.Errorf("bridge: approval server listen %s: %w", b.cfg.HookAddr, err)
+	}
+	go b.serveApprovals(ctx, ln)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 50 // long-poll; messages queue on Telegram during downtime (§3)
@@ -119,7 +133,12 @@ func (b *Bridge) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		b.handleCommand(msg, key, text)
 		return
 	}
-	b.handleAgentTurn(ctx, msg, key, text)
+	// Agent turns run in their own goroutine: the poll loop must keep draining
+	// updates or approval button presses and /stop would deadlock behind the
+	// very turn that is waiting for them. Commands and callbacks stay
+	// synchronous — they are fast. The b.runs busy-gate below keeps it to one
+	// turn per chat.
+	go b.handleAgentTurn(ctx, msg, key, text)
 }
 
 // keyFor builds the group-ready session key. ThreadID is 0 for 1:1 chats; forum
@@ -194,9 +213,7 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 				return
 			}
 			sentText = true
-			if err := b.sender.SendMarkdown(msg.Chat.ID, text); err != nil {
-				log.Printf("send reply: %v", err)
-			}
+			b.sendReply(msg.Chat.ID, text)
 		},
 		OnToolUse: func(name, summary string) {
 			s := "🔧 " + name
@@ -212,6 +229,8 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		Prompt:          prompt,
 		WorkDir:         sess.WorkDir,
 		ClaudeSessionID: sess.ClaudeSessionID,
+		Model:           sess.Model,
+		Effort:          sess.Effort,
 	}, cb)
 
 	status.Delete()
@@ -227,9 +246,7 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 
 	// Ensure the final answer is delivered even if it never streamed as a block.
 	if !sentText && res != nil && strings.TrimSpace(res.Text) != "" {
-		if err := b.sender.SendMarkdown(msg.Chat.ID, res.Text); err != nil {
-			log.Printf("send final: %v", err)
-		}
+		b.sendReply(msg.Chat.ID, res.Text)
 	}
 	if res != nil && res.IsError {
 		b.reply(msg.Chat.ID, "⚠️ the agent turn ended with an error ("+res.Subtype+").")
@@ -242,6 +259,26 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 			b.reply(msg.Chat.ID, fmt.Sprintf(
 				"⚠️ daily budget reached: $%.2f / $%.2f.", total, b.cfg.DailyBudgetUSD))
 		}
+	}
+}
+
+// docThreshold is the reply length (bytes) above which the answer goes out as
+// a document attachment instead of a stream of chunked messages (§7): past ~3
+// full chunks, a file is more readable than a minute of rate-gapped sends.
+const docThreshold = 12000
+
+// sendReply delivers agent output: as chunked HTML messages normally, as a
+// Markdown document attachment when it's long (§7). Failures are logged; the
+// chunk path already retries once internally.
+func (b *Bridge) sendReply(chatID int64, text string) {
+	if len(text) > docThreshold {
+		if err := b.sender.SendDocument(chatID, "reply.md", []byte(text), "📄 long reply attached"); err == nil {
+			return
+		}
+		// fall back to chunked messages if the upload failed
+	}
+	if err := b.sender.SendMarkdown(chatID, text); err != nil {
+		log.Printf("send reply: %v", err)
 	}
 }
 

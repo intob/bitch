@@ -124,7 +124,9 @@ func riskyVerdict(tier int, action, detail string) Verdict {
 func isReadTool(t string) bool {
 	switch t {
 	case "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
-		"TodoWrite", "BashOutput":
+		"TodoWrite", "BashOutput",
+		// Killing one of the agent's own background shells is inert.
+		"KillBash", "KillShell":
 		return true
 	}
 	return false
@@ -139,7 +141,7 @@ func isEditTool(t string) bool {
 }
 
 func isBashTool(t string) bool {
-	return t == "Bash" || t == "KillBash" || t == "KillShell"
+	return t == "Bash"
 }
 
 // --- bash classification -------------------------------------------------
@@ -153,8 +155,10 @@ const (
 )
 
 // denyPatterns match destructive ops, network writes, privilege escalation, and
-// credential reads. Below T3 these always ask or deny (§4.3). Fail-closed: when
-// in doubt, this list errs toward flagging.
+// credential reads. Below T3 these always ask or deny (§4.3). They scan the
+// WHOLE command string, so they also catch badness embedded in the arguments of
+// an otherwise-safe leading command. Fail-closed: when in doubt, err toward
+// flagging. The agent runs as root, so /root/ variants matter as much as ~.
 var denyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\brm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rf]`), // rm -rf / rm -fr / rm -r -f
 	regexp.MustCompile(`\brm\s+-[a-zA-Z]*r`),                    // rm -r
@@ -169,37 +173,92 @@ var denyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(systemctl|service|launchctl)\b`),        // service control
 	regexp.MustCompile(`\bchmod\s+(-[a-zA-Z]*\s+)*[0-7]*7{2,3}\b`), // world-writable
 	regexp.MustCompile(`\bchown\b`),
-	regexp.MustCompile(`(~|\$HOME)/\.ssh`),                                       // ssh key access
-	regexp.MustCompile(`(~|\$HOME)/\.aws|\.config/gh|\.netrc|id_rsa|id_ed25519`), // cred files
-	regexp.MustCompile(`\bufw\b|\biptables\b|\bnft\b`),                           // firewall tampering
-	regexp.MustCompile(`:\s*\(\s*\)\s*\{`),                                       // fork bomb :(){ :|:& };:
-	regexp.MustCompile(`>\s*/dev/(sd|nvme|disk)`),                                // write to raw disk
+	regexp.MustCompile(`(~|\$HOME|/root)/\.ssh`),                                       // ssh key access (agent HOME is /root)
+	regexp.MustCompile(`(~|\$HOME|/root)/\.aws|\.config/gh|\.netrc|id_rsa|id_ed25519`), // cred files
+	regexp.MustCompile(`/etc/bitch`),                                                   // the bridge's own secrets (§4.2)
+	regexp.MustCompile(`\bfind\b[^;|&]*\s-(delete|exec|execdir|ok|okdir)\b`),           // find as an exec/delete engine
+	regexp.MustCompile(`\bufw\b|\biptables\b|\bnft\b`),                                 // firewall tampering
+	regexp.MustCompile(`:\s*\(\s*\)\s*\{`),                                             // fork bomb :(){ :|:& };:
+	regexp.MustCompile(`>\s*/dev/(sd|nvme|disk)`),                                      // write to raw disk
 }
 
-// safeCommands are leading tokens that only read or do local, reversible work.
+// safeCommands are leading tokens that are inert: they read, filter, or format,
+// and cannot execute other code or write outside the current directory. The
+// bar is deliberately high — under the full-root posture this allowlist is the
+// primary boundary (§4.6), so anything that can interpret code (python, node,
+// awk), install code from the network (npx, pip), edit arbitrary files (sed
+// -i), or print secrets (env) must go through Ask instead. Commands whose
+// safety depends on the subcommand (git, go, npm, …) live in safeSubcommands.
+//
+// Executing code that lives in the workdir (go test, npm test, pytest) is
+// allowed on purpose: a coding agent that cannot run the code it writes is
+// useless, and code the agent authored is at least visible in the transcript
+// and the diff. The zero-footprint escapes (inline -c code, network installs)
+// are what this list refuses.
 var safeCommands = map[string]bool{
 	"ls": true, "cat": true, "pwd": true, "echo": true, "printf": true,
 	"head": true, "tail": true, "wc": true, "grep": true, "rg": true,
 	"find": true, "which": true, "type": true, "file": true, "stat": true,
-	"tree": true, "date": true, "env": true, "whoami": true, "hostname": true,
+	"tree": true, "date": true, "whoami": true, "hostname": true,
 	"uname": true, "df": true, "du": true, "sort": true, "uniq": true,
-	"cut": true, "awk": true, "sed": true, "tr": true, "diff": true,
+	"cut": true, "tr": true, "diff": true,
 	"true": true, "false": true, "test": true, "sleep": true, "basename": true,
 	"dirname": true, "realpath": true, "readlink": true, "cd": true, "jq": true,
-	// version-control read-only
-	"git": true, // git is refined below (push/remote are caught by denyPatterns)
-	// build/test toolchains (local, reversible)
-	"go": true, "gofmt": true, "goimports": true,
-	"node": true, "npm": true, "npx": true, "pnpm": true, "yarn": true,
-	"python": true, "python3": true, "pip": true, "pip3": true, "pytest": true,
-	"make": true, "cargo": true, "rustc": true, "tsc": true, "eslint": true,
+	// format/lint/test of workdir code
+	"gofmt": true, "goimports": true, "pytest": true, "tsc": true, "eslint": true,
+	// make runs the workdir Makefile — the agent-authored-code class above
+	"make": true,
+}
+
+// safeSubcommands are commands that are safe only with an allowlisted first
+// subcommand: read-only VCS queries and build/test of workdir code. Anything
+// else (git clean/reset/config, go run/generate with its module-fetch-and-run,
+// npm install/ci/exec, pip install) falls through to Ask.
+var safeSubcommands = map[string]map[string]bool{
+	"git": {"status": true, "diff": true, "log": true, "show": true,
+		"branch": true, "blame": true, "rev-parse": true, "ls-files": true,
+		"describe": true, "shortlog": true, "grep": true, "fetch": true},
+	"go": {"build": true, "test": true, "vet": true, "fmt": true,
+		"list": true, "mod": true, "version": true, "doc": true},
+	"npm":   {"test": true, "run": true, "ls": true, "view": true},
+	"pnpm":  {"test": true, "run": true, "ls": true},
+	"yarn":  {"test": true, "run": true},
+	"cargo": {"build": true, "test": true, "check": true, "fmt": true, "clippy": true, "tree": true},
+	"pip":   {"list": true, "show": true, "freeze": true, "check": true},
+	"pip3":  {"list": true, "show": true, "freeze": true, "check": true},
 }
 
 var shellSplit = regexp.MustCompile(`&&|\|\||\||;|\n`)
 
+// fdDupRe / devNullRe strip harmless redirect forms (2>&1, >/dev/null) before
+// hasFileRedirect looks for real file redirection.
+var (
+	fdDupRe   = regexp.MustCompile(`\d*>&\d+`)
+	devNullRe = regexp.MustCompile(`\d*>>?\s*/dev/null`)
+)
+
+// hasFileRedirect reports whether cmd redirects output to a file. A safe
+// leading command with `> path` writes an arbitrary file as root (e.g.
+// `echo x > /etc/systemd/system/bitch.service`), so any surviving `>` demotes
+// the command to Ask. Conservative: a literal '>' inside quotes also trips it.
+func hasFileRedirect(cmd string) bool {
+	s := fdDupRe.ReplaceAllString(cmd, "")
+	s = devNullRe.ReplaceAllString(s, "")
+	return strings.Contains(s, ">")
+}
+
+// hasSubstitution reports whether cmd embeds command/process substitution —
+// `$(…)`, backticks, `<(…)` — which hides an inner command from the leading-
+// token check. Those go to Ask.
+func hasSubstitution(cmd string) bool {
+	return strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") ||
+		strings.Contains(cmd, "<(")
+}
+
 // ClassifyBash categorizes a bash command as safe, risky, or unknown. Chained
 // commands are safe only if every segment is safe; any risky segment taints the
-// whole. Exported for tests.
+// whole; redirects and substitutions demote to unknown (Ask). Exported for
+// tests.
 func ClassifyBash(cmd string) bashClass {
 	if cmd == "" {
 		return bashUnknown
@@ -209,6 +268,9 @@ func ClassifyBash(cmd string) bashClass {
 			return bashRisky
 		}
 	}
+	if hasSubstitution(cmd) || hasFileRedirect(cmd) {
+		return bashUnknown
+	}
 	segments := shellSplit.Split(cmd, -1)
 	allSafe := true
 	for _, seg := range segments {
@@ -216,8 +278,13 @@ func ClassifyBash(cmd string) bashClass {
 		if seg == "" {
 			continue
 		}
-		lead := leadingCommand(seg)
-		if !safeCommands[lead] {
+		lead, sub := leadingTokens(seg)
+		switch {
+		case safeCommands[lead]:
+			// safe
+		case safeSubcommands[lead] != nil && safeSubcommands[lead][sub]:
+			// safe subcommand (git status, go test, …)
+		default:
 			allSafe = false
 		}
 	}
@@ -227,18 +294,30 @@ func ClassifyBash(cmd string) bashClass {
 	return bashUnknown
 }
 
-// leadingCommand extracts the executable token from a segment, skipping leading
-// environment-variable assignments (FOO=bar cmd …).
-func leadingCommand(seg string) string {
+// leadingTokens extracts the executable token and its first subcommand from a
+// segment, skipping leading environment-variable assignments (FOO=bar cmd …).
+// The subcommand is the first argument that doesn't look like a flag; a flag
+// taking a value (git -C dir log) yields the value and thus fails the
+// subcommand allowlist — conservative by design.
+func leadingTokens(seg string) (cmd, sub string) {
 	fields := strings.Fields(seg)
-	for _, f := range fields {
+	i := 0
+	for ; i < len(fields); i++ {
+		f := fields[i]
 		if strings.Contains(f, "=") && !strings.HasPrefix(f, "-") {
 			continue // VAR=value prefix
 		}
 		// strip a path, e.g. /usr/bin/git -> git
-		return filepath.Base(f)
+		cmd = filepath.Base(f)
+		break
 	}
-	return ""
+	for j := i + 1; j < len(fields); j++ {
+		if !strings.HasPrefix(fields[j], "-") {
+			sub = fields[j]
+			break
+		}
+	}
+	return cmd, sub
 }
 
 // --- helpers -------------------------------------------------------------
@@ -256,7 +335,28 @@ func resolve(workdir, p string) string {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(workdir, p)
 	}
-	return filepath.Clean(p)
+	return resolveSymlinks(filepath.Clean(p))
+}
+
+// resolveSymlinks resolves symlinks in the deepest existing ancestor of p, so
+// the jail check sees the physical path — a symlink inside the workdir pointing
+// outside it must not launder the target (§4.3). Works for paths that don't
+// exist yet (new files): the missing tail is re-joined onto the resolved
+// ancestor. If nothing resolves (pure lexical path, as in tests), p is
+// returned unchanged.
+func resolveSymlinks(p string) string {
+	remainder := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p // hit the root without resolving anything
+		}
+		remainder = filepath.Join(filepath.Base(cur), remainder)
+		cur = parent
+	}
 }
 
 func editDetail(in map[string]any) string {

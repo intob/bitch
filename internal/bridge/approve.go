@@ -40,15 +40,12 @@ type hookResponse struct {
 
 // serveApprovals runs the loopback HTTP server the permission hook calls into
 // (§4.3). It binds to 127.0.0.1 only — no inbound app ports (§3) — and is gated
-// by a shared secret so nothing else on the box can drive approvals.
-func (b *Bridge) serveApprovals(ctx context.Context) {
+// by a shared secret so nothing else on the box can drive approvals. The
+// listener is created by Run so a bind failure aborts startup cleanly.
+func (b *Bridge) serveApprovals(ctx context.Context, ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/approve", b.handleApprove)
 
-	ln, err := net.Listen("tcp", b.cfg.HookAddr)
-	if err != nil {
-		log.Fatalf("approval server: listen %s: %v", b.cfg.HookAddr, err)
-	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()

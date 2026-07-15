@@ -9,6 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/intob/bitch/internal/config"
 	"github.com/intob/bitch/internal/store"
 )
 
@@ -38,6 +39,10 @@ func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string
 		b.cmdStop(msg, key)
 	case "/tier":
 		b.cmdTier(msg, key, arg)
+	case "/model":
+		b.cmdModel(msg, key, arg)
+	case "/effort":
+		b.cmdEffort(msg, key, arg)
 	case "/cd":
 		b.cmdCd(msg, key, arg)
 	case "/status":
@@ -51,8 +56,10 @@ const helpText = `bitch — commands:
 /new [dir] — start a fresh session (optionally in dir)
 /cd <path> — switch working directory (starts a fresh session)
 /tier <0-3> — set permission tier (with confirm)
+/model <name> — set model (opus|sonnet|haiku|fable or a claude-… id; "default" to reset)
+/effort <level> — set effort (low|medium|high|xhigh|max; "default" to reset)
 /stop — cancel the current turn
-/status — session, dir, tier, today's spend
+/status — session, dir, tier, model, effort, today's spend
 Anything else is sent to the agent.`
 
 func (b *Bridge) cmdNew(msg *tgbotapi.Message, key store.Key, arg string) {
@@ -151,6 +158,111 @@ func (b *Bridge) cmdTier(msg *tgbotapi.Message, key store.Key, arg string) {
 	}
 }
 
+// modelAliases maps friendly shorthands to canonical model ids. Full
+// claude-… ids are also accepted (passed through) so new models work without a
+// code change; the CLI is the final authority on validity.
+var modelAliases = map[string]string{
+	"opus":   "claude-opus-4-8",
+	"sonnet": "claude-sonnet-5",
+	"haiku":  "claude-haiku-4-5-20251001",
+	"fable":  "claude-fable-5",
+}
+
+// normalizeModel resolves an alias or accepts a claude-… id, returning the
+// canonical id and true, or ("", false) if it looks like neither.
+func normalizeModel(s string) (string, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "", false
+	}
+	if m, ok := modelAliases[s]; ok {
+		return m, true
+	}
+	if strings.HasPrefix(s, "claude-") {
+		return s, true
+	}
+	return "", false
+}
+
+// cmdModel sets the per-session model override (§9.1). Unlike /tier this is not
+// a security-relevant change, so it applies immediately without confirmation;
+// it takes effect on the next turn (the resumed session picks up --model).
+func (b *Bridge) cmdModel(msg *tgbotapi.Message, key store.Key, arg string) {
+	sess, err := b.session(key)
+	if err != nil {
+		b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+		return
+	}
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		cur := sess.Model
+		if cur == "" {
+			cur = b.cfg.Model + " (default)"
+		}
+		b.reply(msg.Chat.ID, "current model: "+cur+
+			"\nusage: /model <opus|sonnet|haiku|fable | claude-… id | default>")
+		return
+	}
+	if arg == "default" || arg == "reset" {
+		sess.Model = ""
+		if err := b.store.Upsert(sess); err != nil {
+			b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+			return
+		}
+		b.reply(msg.Chat.ID, "🧠 model reset to default ("+b.cfg.Model+"); applies to the next turn.")
+		return
+	}
+	m, ok := normalizeModel(arg)
+	if !ok {
+		b.reply(msg.Chat.ID, "unknown model \""+arg+"\". use opus|sonnet|haiku|fable, a claude-… id, or default.")
+		return
+	}
+	sess.Model = m
+	if err := b.store.Upsert(sess); err != nil {
+		b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+		return
+	}
+	b.reply(msg.Chat.ID, "🧠 model set to "+m+"; applies to the next turn.")
+}
+
+// cmdEffort sets the per-session effort override (§9.1). Like /model, applied
+// immediately, effective next turn.
+func (b *Bridge) cmdEffort(msg *tgbotapi.Message, key store.Key, arg string) {
+	sess, err := b.session(key)
+	if err != nil {
+		b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+		return
+	}
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	if arg == "" {
+		cur := sess.Effort
+		if cur == "" {
+			cur = b.cfg.Effort + " (default)"
+		}
+		b.reply(msg.Chat.ID, "current effort: "+cur+"\nusage: /effort <low|medium|high|xhigh|max | default>")
+		return
+	}
+	if arg == "default" || arg == "reset" {
+		sess.Effort = ""
+		if err := b.store.Upsert(sess); err != nil {
+			b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+			return
+		}
+		b.reply(msg.Chat.ID, "⚙️ effort reset to default ("+b.cfg.Effort+"); applies to the next turn.")
+		return
+	}
+	if config.NormalizeEffort(arg) == "" {
+		b.reply(msg.Chat.ID, "effort must be one of: low, medium, high, xhigh, max (or default).")
+		return
+	}
+	sess.Effort = arg
+	if err := b.store.Upsert(sess); err != nil {
+		b.reply(msg.Chat.ID, "⚠️ "+err.Error())
+		return
+	}
+	b.reply(msg.Chat.ID, "⚙️ effort set to "+arg+"; applies to the next turn.")
+}
+
 func (b *Bridge) cmdStatus(msg *tgbotapi.Message, key store.Key) {
 	sess, err := b.session(key)
 	if err != nil {
@@ -176,9 +288,18 @@ func (b *Bridge) cmdStatus(msg *tgbotapi.Message, key store.Key) {
 	if busy {
 		status = "running"
 	}
+	// Show the effective model/effort, flagging when it's the config default.
+	model := sess.Model
+	if model == "" {
+		model = b.cfg.Model + " (default)"
+	}
+	effort := sess.Effort
+	if effort == "" {
+		effort = b.cfg.Effort + " (default)"
+	}
 	b.reply(msg.Chat.ID, fmt.Sprintf(
-		"status: %s\ndir: %s\ntier: %s\nmodel: %s (effort %s)\nsession: %s\nspend today: $%.2f / %s",
-		status, sess.WorkDir, tierNames[sess.Tier], b.cfg.Model, b.cfg.EffortFlag(),
+		"status: %s\ndir: %s\ntier: %s\nmodel: %s\neffort: %s\nsession: %s\nspend today: $%.2f / %s",
+		status, sess.WorkDir, tierNames[sess.Tier], model, effort,
 		sid, spent, budget))
 }
 
@@ -238,6 +359,11 @@ func (b *Bridge) resolveDir(base, arg string) (string, error) {
 		p = filepath.Join(base, arg)
 	}
 	p = filepath.Clean(p)
+	// Resolve symlinks before the jail check so a link inside a root pointing
+	// outside it can't launder the target (§4.3).
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
 	if !b.cfg.WithinRoots(p) {
 		return "", fmt.Errorf("%s is outside the allowed roots", p)
 	}

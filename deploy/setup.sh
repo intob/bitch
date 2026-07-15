@@ -11,6 +11,10 @@ set -euo pipefail
 
 ADMIN_USER="${ADMIN_USER:-admin}"        # non-root SSH user (§4.5)
 GO_VERSION="${GO_VERSION:-1.26.3}"
+# Pinned: the bridge is coupled to the CLI's stream-json shapes, hook contract,
+# and flags. Upgrade deliberately (bump here, rebuild, retest) — never track
+# npm latest. The bridge preflights `claude --version` at boot.
+CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.210}"
 ARCH="arm64"                              # CAX is ARM (§5)
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -77,13 +81,13 @@ if ! command -v go >/dev/null || [ "$(go version 2>/dev/null | awk '{print $3}')
     ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 fi
 
-log "Node.js LTS + Claude Code CLI"
+log "Node.js LTS + Claude Code CLI ${CLAUDE_VERSION} (pinned)"
 if ! command -v node >/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
     apt-get install -y nodejs
 fi
-if ! command -v claude >/dev/null; then
-    npm install -g @anthropic-ai/claude-code
+if ! command -v claude >/dev/null || ! claude --version 2>/dev/null | grep -q "^${CLAUDE_VERSION}"; then
+    npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 fi
 
 log "Build bitch"

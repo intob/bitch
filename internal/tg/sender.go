@@ -2,6 +2,7 @@ package tg
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -32,7 +33,10 @@ func (s *Sender) SendHTML(chatID int64, html string) (int, error) {
 	return sent.MessageID, nil
 }
 
-// SendMarkdown renders Markdown to HTML, chunks it, and sends each part.
+// SendMarkdown renders Markdown to HTML, chunks it, and sends each part. A
+// failed chunk is retried once after a rate-gap pause (transient 429s must not
+// silently eat the final answer), then falls back to plain text (a parse error
+// will fail identically on retry).
 func (s *Sender) SendMarkdown(chatID int64, md string) error {
 	chunks := Chunk(md)
 	for i, c := range chunks {
@@ -40,9 +44,11 @@ func (s *Sender) SendMarkdown(chatID int64, md string) error {
 			continue
 		}
 		if _, err := s.SendHTML(chatID, c); err != nil {
-			// Fall back to plain text if the model emitted HTML we mis-rendered.
-			if _, perr := s.sendPlain(chatID, stripTags(c)); perr != nil {
-				return fmt.Errorf("send chunk %d: %w", i, err)
+			time.Sleep(rateGap)
+			if _, err = s.SendHTML(chatID, c); err != nil {
+				if _, perr := s.sendPlain(chatID, stripTags(c)); perr != nil {
+					return fmt.Errorf("send chunk %d: %w", i, err)
+				}
 			}
 		}
 		if i < len(chunks)-1 {
@@ -75,13 +81,23 @@ func (s *Sender) SendDocument(chatID int64, filename string, data []byte, captio
 // --- status message ------------------------------------------------------
 
 // Status is a single Telegram message that gets edited in place to reflect
-// progress ("🔧 running tests…"), instead of spamming new messages (§7).
+// progress ("🔧 running tests…"), instead of spamming new messages (§7). Set
+// self-throttles to one edit per editGap: a tool-heavy turn fires updates far
+// faster than Telegram's edit rate limit, and the library does not retry 429s.
 type Status struct {
 	s      *Sender
 	chatID int64
 	msgID  int
-	last   string
+
+	mu       sync.Mutex
+	last     string // last text actually sent
+	want     string // latest desired text
+	lastEdit time.Time
+	timer    *time.Timer // pending deferred flush, nil if none
 }
+
+// editGap is the minimum interval between edits of the status message.
+const editGap = 1500 * time.Millisecond
 
 // NewStatus posts the initial status message.
 func (s *Sender) NewStatus(chatID int64, initialHTML string) (*Status, error) {
@@ -89,13 +105,38 @@ func (s *Sender) NewStatus(chatID int64, initialHTML string) (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Status{s: s, chatID: chatID, msgID: id, last: initialHTML}, nil
+	return &Status{s: s, chatID: chatID, msgID: id, last: initialHTML, lastEdit: time.Now()}, nil
 }
 
-// Set edits the status message if the text changed. Rate-limit friendly: the
-// caller should throttle rapid updates.
+// Set records the desired status text and edits the message, deferring the
+// edit if one happened within editGap. Only the newest text survives a defer.
 func (st *Status) Set(html string) {
-	if st == nil || html == st.last || html == "" {
+	if st == nil || html == "" {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.want = html
+	if st.timer != nil {
+		return // a flush is already scheduled; it will pick up want
+	}
+	if since := time.Since(st.lastEdit); since < editGap {
+		st.timer = time.AfterFunc(editGap-since, st.flush)
+		return
+	}
+	st.edit(html)
+}
+
+func (st *Status) flush() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.timer = nil
+	st.edit(st.want)
+}
+
+// edit performs the API call. Callers must hold st.mu.
+func (st *Status) edit(html string) {
+	if html == st.last || html == "" {
 		return
 	}
 	edit := tgbotapi.NewEditMessageText(st.chatID, st.msgID, html)
@@ -104,6 +145,7 @@ func (st *Status) Set(html string) {
 	if _, err := st.s.bot.Send(edit); err == nil {
 		st.last = html
 	}
+	st.lastEdit = time.Now()
 }
 
 // Delete removes the status message once the turn is done.
@@ -111,6 +153,12 @@ func (st *Status) Delete() {
 	if st == nil {
 		return
 	}
+	st.mu.Lock()
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	st.mu.Unlock()
 	_, _ = st.s.bot.Request(tgbotapi.NewDeleteMessage(st.chatID, st.msgID))
 }
 
