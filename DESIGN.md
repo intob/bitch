@@ -299,12 +299,77 @@ works regardless of where you (or the laptop) are.
   whole queue is drained, joined, and run as the next turn in the same session.
   Overflow past the bound is refused. `/stop` cancels the running turn *and*
   clears the queue — stopping means stopping the work stream, not queuing a
-  surprise follow-up.
+  surprise follow-up. It sweeps by **chat**, so it also stops job turns (§6.1)
+  streaming into that chat: stop means the cards you can see, not the one key
+  you happen to be typing under.
+- **Session history.** The sessions table holds only the session a key is
+  *currently* on, so `/new` and `/cd` used to drop the old Claude session id
+  forever — even though the conversation itself survives on the box's disk. A
+  `session_history` row is recorded per key each time the bridge starts a fresh
+  session (titled with the first line of its first prompt), touched on every
+  completed turn, and pruned to the newest 20. `/sessions` lists them
+  newest-first; `/resume <n>` switches back. Notes:
+  - **The workdir is restored with the id.** Claude Code sessions are
+    project-scoped — the same fact that makes `/cd` start fresh — so an id
+    without its dir would hand `--resume` a session from another project. The
+    stored dir is re-jailed on the way back in (roots may have changed since),
+    and a dir now outside the roots refuses the resume rather than moving
+    somewhere else.
+  - **Refused mid-turn.** The session id is what routes approvals back to the
+    chat (§4.3); swapping it under a live turn would corrupt that routing.
+  - History is per key, so a job's sessions (§6.1) never show in the owning
+    chat's listing — a job's continuity is the job's business.
+  - A resumed session that no longer exists on disk (expired, rebuilt box) hits
+    the existing "No conversation found → start fresh" fallback, which now says
+    so out loud and drops the dead row; after an explicit `/resume`, silence
+    there would read as the resume having worked.
 - **Control commands:** `/new [dir]`, `/stop`, `/tier <0-3>` (with confirm),
   `/model <name>`, `/effort <level>`, `/cd <path>` (within allowed roots),
-  `/status` (session, dir, tier, model, effort, spend). `/model` and `/effort`
-  set per-session overrides (empty ⇒ the config default) and take effect on the
-  next turn.
+  `/sessions`, `/resume <n>`, `/status` (session, dir, tier, model, effort,
+  spend). `/model` and `/effort` set per-session overrides (empty ⇒ the config
+  default) and take effect on the next turn.
+
+### 6.1 Scheduled turns (jobs)
+
+The box is always-on, but a purely reactive agent is SSH with extra steps.
+A **job** is a cron spec plus a prompt — "every night at 02:00, pull main, run
+the tests, message me only if something broke."
+
+- **A job is a session with a synthetic thread**, keyed
+  `(chat_id, -job_id, bot_id)`. Real chats are always `thread_id` 0 and forum
+  topic ids would be positive, so negatives can't collide (§11). That reuses the
+  existing machinery wholesale: each job gets its own Claude session continuity
+  (**without** clobbering the interactive one), its own workdir/tier/model row,
+  approval routing via `GetByClaudeSession` (§4.3), and the one-turn-per-key
+  gate. The hook neither knows nor cares that a turn was scheduled.
+- **A job inherits the chat's dir and tier at creation time**, copied into its
+  own session row and stated in the `/jobs add` confirmation — a later `/tier`
+  in the chat must not silently re-arm a job created at T1. `/jobs tier <id>`
+  changes it, with the same confirm-button flow as `/tier`.
+- **Approvals while asleep fail closed.** A scheduled turn that hits a risky op
+  sends the normal card; nobody answers; it times out and denies. No special
+  casing — that *is* the correct behavior.
+- **Per-job spend cap** (`cap_usd`, default $2.00, `/jobs add … cap=5`). Before
+  each run: if `SpendToday() + cap` would exceed the daily budget, skip the run
+  and say so. This is a **pre-flight reservation, not a mid-turn kill** — the
+  CLI reports cost only at the result event, so the daily budget guard (§4.4)
+  remains the backstop. The `/jobs` help says this plainly.
+- **Scheduler:** `robfig/cron/v3` for parse + next-time only (cron specs and
+  `@every 4h`/`@daily`); all times **UTC**, stated in `/jobs` output. Own
+  goroutine, never the poll loop; every 30s it takes due jobs and `go`-spawns
+  each turn. `next_run` is **persisted before the turn launches**, so a crash
+  costs a run rather than repeating one — fail closed applies to money too. An
+  overdue job (box was down) runs once on the first tick; older misses collapse
+  into it. A job still running when it next comes due skips that occurrence.
+- **Commands:** `/jobs` (list), `/jobs add <spec> [cap=<usd>] :: <prompt>` (the
+  `::` separator is because a cron spec is bare tokens and a prompt is free
+  text — any positional split would be a guess), `/jobs rm <id>` (confirm),
+  `/jobs run <id>`, `/jobs pause|resume <id>`, `/jobs tier <id> <0-3>`.
+- Output goes to the owning chat; the activity card renders as usual, labelled
+  with the job id so an unprompted card says what asked for it.
+- **Deferred:** quiet mode ("only message me if broken") is mostly prompt-level
+  and stays that way for now; the mechanical assist is a `quiet` flag that
+  suppresses the reply when the result is exactly `OK`.
 
 ---
 
@@ -445,7 +510,11 @@ The foundation is deliberately the substrate for the multi-agent pipeline:
   `(chat_id, thread_id, bot_id)` and handle @mention addressing from day one — a
   Telegram **supergroup with topics** is the natural home for the multi-agent
   "team standup," and building group-ready now makes that move additive, not a
-  refactor. (Group `chat_id`s are negative; topics add `thread_id`.)
+  refactor. (Group `chat_id`s are negative; topics add `thread_id`.) **Jobs
+  (§6.1) are the first consumer of that keying**: they run under a synthetic
+  negative `thread_id`, which is exactly the "a session is not a chat" seam the
+  multi-agent layer needs — and it reserves positive thread ids for real forum
+  topics.
 - **Scaling out** is easy from a VPS: bigger box, or several boxes.
 
 Prove the single agent first; add roles as a layer, not a rewrite.

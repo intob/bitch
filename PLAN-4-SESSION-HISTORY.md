@@ -1,9 +1,19 @@
 # PLAN 4 — session history: /sessions and /resume
 
-Status: **proposal, not yet implemented.** Build order: **4 of 6** —
-independent of the others; benefits from PLAN-1-QUEUE.md's `runTurn`
-extraction for the recording hooks. Authority for intent is `DESIGN.md`;
-read alongside `CLAUDE.md` (invariants).
+Status: **implemented, 2026-07-16** — see DESIGN.md §6, which is now the
+authority; this doc is kept as the rationale record. Build order: **4 of 6**.
+
+Shipped as planned, with three deltas: the store method is
+**`DeleteSessionHistory`**, not `DeleteSession` (which would read, next to
+`Session`/`Upsert`, as deleting the session row); `/resume`'s decision half is
+split into **`resumeSession`** so the rules are testable without a Telegram
+sender; and the expired-session note fires on **every** dead resume, not only an
+explicit `/resume` — the bridge doesn't track which turn's id came from where,
+and the note is honest in both cases. Ordering also needed a **`rowid` tiebreak**:
+`last_used` is whole seconds, so two sessions started in the same second would
+otherwise list in an arbitrary order. A failed *fresh* turn now drops its
+history row alongside the optimistic id, so `/resume` can't offer a session
+that never materialized.
 
 ## 1. The ask
 

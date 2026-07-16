@@ -1,9 +1,13 @@
 # PLAN 3 — scheduled / proactive turns (jobs)
 
-Status: **proposal, not yet implemented.** Build order: **3 of 6**. Depends
-on the `runTurn` refactor from PLAN-1-QUEUE.md. Per-job spend cap is
-**decided: yes** (user, 2026-07-16). Authority for intent is `DESIGN.md`;
-read alongside `CLAUDE.md` (invariants).
+Status: **implemented, 2026-07-16** — see DESIGN.md §6.1, which is now the
+authority; this doc is kept as the rationale record. Build order: **3 of 6**.
+Per-job spend cap was **decided: yes** (user, 2026-07-16).
+
+Shipped as planned, with two deltas: **quiet mode stayed deferred and its
+`quiet` column was not created** (an unused column is speculative — phase 2 can
+`ALTER TABLE`), and `runTurn` gained a `label` (activity-card tag) and returns a
+short outcome word for the job's `last_status`.
 
 ## 1. The ask
 

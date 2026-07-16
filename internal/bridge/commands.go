@@ -21,8 +21,10 @@ var tierNames = map[int]string{
 	3: "T3 full autonomy",
 }
 
-// handleCommand dispatches the /slash control commands (§6).
-func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string) {
+// handleCommand dispatches the /slash control commands (§6). It stays
+// synchronous on the poll loop — commands are fast; the one that starts a turn
+// (/jobs run) spawns it, which is why ctx comes through here.
+func (b *Bridge) handleCommand(ctx context.Context, msg *tgbotapi.Message, key store.Key, text string) {
 	fields := strings.Fields(text)
 	cmd := strings.ToLower(fields[0])
 	// Strip a @botname suffix (groups deliver /cmd@bot).
@@ -46,6 +48,12 @@ func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string
 		b.cmdEffort(msg, key, arg)
 	case "/cd":
 		b.cmdCd(msg, key, arg)
+	case "/sessions":
+		b.cmdSessions(msg, key)
+	case "/resume":
+		b.cmdResume(msg, key, arg)
+	case "/jobs", "/job":
+		b.cmdJobs(ctx, msg, key, arg)
 	case "/secrets", "/secret":
 		b.cmdSecrets(msg, arg)
 	case "/remember":
@@ -62,10 +70,13 @@ func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string
 const helpText = `bitch — commands:
 /new [dir] — start a fresh session (optionally in dir)
 /cd <path> — switch working directory (starts a fresh session)
+/sessions — list this chat's past sessions, newest first
+/resume <n> — switch back to one of them (restores its directory too)
 /tier <0-3> — set permission tier (with confirm)
 /model <name> — set model (opus|sonnet|haiku|fable or a claude-… id; "default" to reset)
 /effort <level> — set effort (low|medium|high|xhigh|max; "default" to reset)
-/stop — cancel the current turn and drop anything queued behind it
+/stop — cancel this chat's turn (and any running job turns), dropping the queue
+/jobs — scheduled turns; /jobs add <spec> :: <prompt> to create one (see /jobs for the rest)
 /secrets — list stored credentials; /secrets set NAME value to store one, /secrets rm NAME to delete
 /remember [KEY value] — recall non-secret facts (email, usernames); no args lists them
 /forget KEY — drop a remembered fact
@@ -122,30 +133,54 @@ func (b *Bridge) cmdCd(msg *tgbotapi.Message, key store.Key, arg string) {
 	b.reply(msg.Chat.ID, "📁 "+dir+" (fresh session)")
 }
 
+// cmdStop cancels everything running in this chat: the interactive turn and any
+// scheduled job turns (§6.1). Jobs live on their own keys, but they stream their
+// cards into this chat — so "stop" has to mean the cards you can see, not the
+// one key you happen to be typing under.
 func (b *Bridge) cmdStop(msg *tgbotapi.Message, key store.Key) {
+	cancels, dropped, jobs := b.takeStops(key)
+	if len(cancels) == 0 {
+		b.reply(msg.Chat.ID, "nothing running.")
+		return
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	// The turn goroutines report their own stop; no reply here to avoid a race.
+	if dropped > 0 {
+		b.reply(msg.Chat.ID, fmt.Sprintf("🗑 dropped %d queued message(s).", dropped))
+	}
+	if jobs > 0 {
+		b.reply(msg.Chat.ID, fmt.Sprintf("🛑 also stopped %d running job turn(s).", jobs))
+	}
+}
+
+// takeStops clears the queues of everything running in key's chat and returns
+// their cancels (plus how many prompts were dropped and how many of the turns
+// were jobs). Cancelling happens outside the lock; collecting under it.
+//
+// The sweep is by chat, not by key: job turns (§6.1) run on their own synthetic
+// keys but stream their cards into this chat, so "stop" has to mean the cards
+// the user can see, not the one key they happen to be typing under.
+func (b *Bridge) takeStops(key store.Key) (cancels []context.CancelFunc, dropped, jobs int) {
 	b.mu.Lock()
-	run, ok := b.runs[key]
-	var cancel context.CancelFunc
-	var dropped int
-	if ok {
+	defer b.mu.Unlock()
+	for k, run := range b.runs {
+		if k.ChatID != key.ChatID || k.BotID != key.BotID {
+			continue
+		}
 		// Clear the queue before cancelling: someone hitting stop wants the work
 		// stream stopped, not a surprise follow-up turn. The drain loop then sees
 		// an empty queue and exits. cancel is read under the lock because the
 		// drain loop swaps it per turn.
-		dropped = len(run.queue)
+		dropped += len(run.queue)
 		run.queue, run.queueBytes = nil, 0
-		cancel = run.cancel
+		cancels = append(cancels, run.cancel)
+		if k.ThreadID < 0 {
+			jobs++
+		}
 	}
-	b.mu.Unlock()
-	if !ok {
-		b.reply(msg.Chat.ID, "nothing running.")
-		return
-	}
-	cancel()
-	// The turn goroutine reports the stop itself; no reply here to avoid a race.
-	if dropped > 0 {
-		b.reply(msg.Chat.ID, fmt.Sprintf("🗑 dropped %d queued message(s).", dropped))
-	}
+	return cancels, dropped, jobs
 }
 
 func (b *Bridge) cmdTier(msg *tgbotapi.Message, key store.Key, arg string) {
@@ -352,6 +387,20 @@ func (b *Bridge) handleCallback(cb *tgbotapi.CallbackQuery) {
 		b.sender.AnswerCallback(cb.ID, "cancelled")
 		if cb.Message != nil {
 			b.sender.ResolveApproval(cb.Message.Chat.ID, cb.Message.MessageID, "deletion cancelled.")
+		}
+	case strings.HasPrefix(data, "jobrm:"):
+		b.confirmJobRmCallback(cb, data)
+	case data == "jobrmx":
+		b.sender.AnswerCallback(cb.ID, "cancelled")
+		if cb.Message != nil {
+			b.sender.ResolveApproval(cb.Message.Chat.ID, cb.Message.MessageID, "deletion cancelled.")
+		}
+	case strings.HasPrefix(data, "jobtier:"):
+		b.confirmJobTierCallback(cb, data)
+	case data == "jobtierx":
+		b.sender.AnswerCallback(cb.ID, "cancelled")
+		if cb.Message != nil {
+			b.sender.ResolveApproval(cb.Message.Chat.ID, cb.Message.MessageID, "tier change cancelled.")
 		}
 	default:
 		b.sender.AnswerCallback(cb.ID, "")

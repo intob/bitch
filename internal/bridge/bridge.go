@@ -85,6 +85,31 @@ func (b *Bridge) claimOrQueue(key store.Key, prompt string, cancel context.Cance
 	return turnQueued
 }
 
+// claimIdle is the claim-or-skip variant of the turn gate, for turns nobody is
+// waiting on: a scheduled job that fires while its previous run is still going
+// skips this occurrence rather than queuing a pile-up behind a job that's
+// already too slow for its own spec (§6.1). The next scheduler tick retries.
+func (b *Bridge) claimIdle(key store.Key, cancel context.CancelFunc) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, busy := b.runs[key]; busy {
+		return false
+	}
+	b.runs[key] = &activeRun{cancel: cancel}
+	return true
+}
+
+// releaseTurn drops the turn slot for key. Job turns don't drain a queue, so
+// they release directly rather than through nextTurn.
+func (b *Bridge) releaseTurn(key store.Key) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if run, ok := b.runs[key]; ok {
+		run.cancel()
+		delete(b.runs, key)
+	}
+}
+
 // nextTurn ends one iteration of the drain loop. It pops the whole queue and
 // installs a fresh cancel for the turn about to start, or — when the queue is
 // empty — releases the chat's turn slot and returns false.
@@ -164,6 +189,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	go b.serveApprovals(ctx, ln)
 
+	// Scheduled turns (§6.1). Its own goroutine: like an agent turn, it must
+	// never run on the poll loop.
+	go b.runScheduler(ctx)
+
 	// The media root is cache, not archive (§7). Best-effort — housekeeping must
 	// never fail a boot.
 	if n, err := pruneMedia(b.cfg.MediaDir, mediaRetention); err != nil {
@@ -228,7 +257,7 @@ func (b *Bridge) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 	if strings.HasPrefix(text, "/") {
-		b.handleCommand(msg, key, text)
+		b.handleCommand(ctx, msg, key, text)
 		return
 	}
 	// Agent turns run in their own goroutine: the poll loop must keep draining
@@ -313,17 +342,10 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 
 	// Backstop: nextTurn releases the slot on the normal path, but a panic in a
 	// turn must not leave the chat wedged as permanently busy.
-	defer func() {
-		b.mu.Lock()
-		if run, ok := b.runs[key]; ok {
-			run.cancel()
-			delete(b.runs, key)
-		}
-		b.mu.Unlock()
-	}()
+	defer b.releaseTurn(key)
 
 	for {
-		b.runTurn(runCtx, key, chatID, prompt)
+		b.runTurn(runCtx, key, chatID, prompt, "")
 		cancel()
 		var more bool
 		prompt, runCtx, cancel, more = b.nextTurn(ctx, key)
@@ -336,11 +358,16 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 // runTurn runs one Claude Code turn for the chat, streaming progress to a status
 // message and the answer back as chunked replies (§7). The session is re-read
 // per turn so a drained follow-up resumes the id the previous turn persisted.
-func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, prompt string) {
+// label, when set, tags the activity card (scheduled jobs, §6.1); interactive
+// turns pass "". The session row must already exist for a job key — a job's dir
+// and inherited tier are not the chat defaults b.session would invent.
+// It returns a short outcome word ("ok", "failed", "stopped", "skipped") for the
+// job scheduler's last-status column; interactive callers ignore it.
+func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, prompt, label string) string {
 	sess, err := b.session(key)
 	if err != nil {
 		b.reply(chatID, "⚠️ store error: "+err.Error())
-		return
+		return "failed"
 	}
 
 	// Budget guard (§4.4): refuse new work once the daily ceiling is hit.
@@ -349,7 +376,7 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 			b.reply(chatID, fmt.Sprintf(
 				"🛑 daily budget reached ($%.2f / $%.2f). New work is paused until midnight UTC.",
 				spent, b.cfg.DailyBudgetUSD))
-			return
+			return "skipped"
 		}
 	}
 
@@ -363,13 +390,45 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 		model = b.cfg.Model
 	}
 	card := newTurnCard(model)
+	if label != "" {
+		card.SetLabel(label)
+	}
+
+	// Recall preamble: non-secret facts (values inline) plus the credential-vault
+	// manifest (secret names only; values go into the env). Both let the agent
+	// reuse things the user provided once instead of re-asking. Vault/fact read
+	// errors are non-fatal — worst case the agent asks; a turn is never aborted.
+	secretVals, secretsManifest := b.vaultForTurn()
+	// captureNudge is always present (gate-independent): the MCP capture tools may
+	// be deferred behind ToolSearch, so the agent needs to be told they exist (§4.7).
+	manifest := joinPreamble(captureNudge, b.factsBlock(), secretsManifest)
+
+	runReq := agent.RunRequest{
+		Prompt:          prompt,
+		WorkDir:         sess.WorkDir,
+		ClaudeSessionID: sess.ClaudeSessionID,
+		MediaDir:        b.cfg.MediaDir,
+		Model:           sess.Model,
+		Effort:          sess.Effort,
+		Secrets:         secretVals,
+		Manifest:        manifest,
+	}
 
 	var sentText bool
+	var claudeID string // the session this turn ran under, for the history touch below
 	cb := agent.Callbacks{
 		OnInit: func(sessionID string) {
 			// Persist the Claude session id so (a) follow-ups --resume it and
 			// (b) the permission hook can route approvals to this chat (§4.3).
+			claudeID = sessionID
 			_ = b.store.SetClaudeSession(key, sessionID)
+			// A fresh session enters the history so /new and /cd stop being lossy
+			// (§6). runReq is the source of truth for "fresh", not sess: the
+			// dead-session retry below re-runs with the id cleared, and that new
+			// session must be recorded too.
+			if runReq.ClaudeSessionID == "" {
+				_ = b.store.RecordSession(key, sessionID, runReq.WorkDir, sessionTitle(prompt))
+			}
 		},
 		OnText: func(text string) {
 			if strings.TrimSpace(text) == "" {
@@ -413,25 +472,6 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 		}
 	}()
 
-	// Recall preamble: non-secret facts (values inline) plus the credential-vault
-	// manifest (secret names only; values go into the env). Both let the agent
-	// reuse things the user provided once instead of re-asking. Vault/fact read
-	// errors are non-fatal — worst case the agent asks; a turn is never aborted.
-	secretVals, secretsManifest := b.vaultForTurn()
-	// captureNudge is always present (gate-independent): the MCP capture tools may
-	// be deferred behind ToolSearch, so the agent needs to be told they exist (§4.7).
-	manifest := joinPreamble(captureNudge, b.factsBlock(), secretsManifest)
-
-	runReq := agent.RunRequest{
-		Prompt:          prompt,
-		WorkDir:         sess.WorkDir,
-		ClaudeSessionID: sess.ClaudeSessionID,
-		MediaDir:        b.cfg.MediaDir,
-		Model:           sess.Model,
-		Effort:          sess.Effort,
-		Secrets:         secretVals,
-		Manifest:        manifest,
-	}
 	res, err := b.runner.Run(runCtx, runReq, cb)
 
 	// If we tried to resume a session that no longer exists — a prior failed
@@ -440,14 +480,21 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 	// emitting any output, so no partial reply reached the user.
 	if err != nil && runReq.ClaudeSessionID != "" && runCtx.Err() == nil &&
 		strings.Contains(err.Error(), "No conversation found") {
+		// Say so rather than silently starting fresh: after an explicit /resume,
+		// silence here would read as the resume having worked. Drop the dead row
+		// too, so /sessions stops offering a session that isn't there.
+		_, _ = b.store.DeleteSessionHistory(key, runReq.ClaudeSessionID)
 		_ = b.store.SetClaudeSession(key, "")
+		b.reply(chatID, "⚠️ that session no longer exists — started fresh.")
 		runReq.ClaudeSessionID = ""
 		res, err = b.runner.Run(runCtx, runReq, cb)
 	}
 	// A failed fresh turn never created a resumable conversation; drop the id
-	// stored optimistically on init so the next turn doesn't resume a ghost.
+	// stored optimistically on init — and its history row — so neither the next
+	// turn nor a later /resume can point at a ghost.
 	if err != nil && runReq.ClaudeSessionID == "" {
 		_ = b.store.SetClaudeSession(key, "")
+		_, _ = b.store.DeleteSessionHistory(key, claudeID)
 	}
 
 	close(tickDone)
@@ -467,19 +514,24 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 	if err != nil {
 		if runCtx.Err() != nil {
 			b.reply(chatID, "🛑 stopped.")
-		} else {
-			log.Printf("agent turn error (chat %d): %v", chatID, err)
-			b.reply(chatID, "⚠️ agent error: "+err.Error())
+			return "stopped"
 		}
-		return
+		log.Printf("agent turn error (chat %d): %v", chatID, err)
+		b.reply(chatID, "⚠️ agent error: "+err.Error())
+		return "failed"
 	}
+
+	// Stamp the session as used so /sessions orders by real recency (§6).
+	_ = b.store.TouchSession(key, claudeID)
 
 	// Ensure the final answer is delivered even if it never streamed as a block.
 	if !sentText && res != nil && strings.TrimSpace(res.Text) != "" {
 		b.sendReply(chatID, res.Text)
 	}
+	outcome := "ok"
 	if res != nil && res.IsError {
 		b.reply(chatID, "⚠️ the agent turn ended with an error ("+res.Subtype+").")
+		outcome = "failed"
 	}
 
 	// Record spend and warn on crossing the budget (§4.4).
@@ -490,6 +542,7 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 				"⚠️ daily budget reached: $%.2f / $%.2f.", total, b.cfg.DailyBudgetUSD))
 		}
 	}
+	return outcome
 }
 
 // docThreshold is the reply length (bytes) above which the answer goes out as

@@ -21,6 +21,7 @@ type turnCard struct {
 	mu    sync.Mutex
 	start time.Time
 	model string
+	label string      // leads the header when set, e.g. "job #3" (§6.1)
 	state string      // header while running: "thinking…" / "working…"
 	lines []cardLine  // most recent tool calls, oldest first
 	drop  int         // lines evicted from the front to bound the card
@@ -45,6 +46,15 @@ const (
 
 func newTurnCard(model string) *turnCard {
 	return &turnCard{start: time.Now(), model: model, state: stateThinking}
+}
+
+// SetLabel marks the card as belonging to something other than a plain
+// interactive turn — a scheduled job, so an unprompted card in the chat says
+// what asked for it (§6.1).
+func (c *turnCard) SetLabel(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.label = s
 }
 
 func (c *turnCard) SetState(s string) {
@@ -118,6 +128,9 @@ func (c *turnCard) RenderFinal(outcome string, res *agent.Result) string {
 // the estimate (final render); otherwise the estimate is shown with a ~.
 func (c *turnCard) render(header string, actualCost float64) string {
 	parts := []string{header, fmtDuration(time.Since(c.start))}
+	if c.label != "" {
+		parts = append([]string{c.label}, parts...)
+	}
 	if u := fmtUsage(c.used); u != "" {
 		parts = append(parts, u)
 	}

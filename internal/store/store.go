@@ -96,7 +96,36 @@ CREATE TABLE IF NOT EXISTS facts (
     value      TEXT NOT NULL,             -- non-secret recall value, injected into the prompt
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
-);`
+);
+
+CREATE TABLE IF NOT EXISTS session_history (
+    chat_id           INTEGER NOT NULL,
+    thread_id         INTEGER NOT NULL,
+    bot_id            INTEGER NOT NULL,
+    claude_session_id TEXT    NOT NULL,
+    workdir           TEXT    NOT NULL,        -- restored on /resume: sessions are project-scoped
+    title             TEXT    NOT NULL DEFAULT '',
+    created_at        INTEGER NOT NULL,
+    last_used         INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, thread_id, bot_id, claude_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_history_recent
+    ON session_history(chat_id, thread_id, bot_id, last_used DESC);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id          INTEGER PRIMARY KEY,
+    chat_id     INTEGER NOT NULL,
+    bot_id      INTEGER NOT NULL,
+    spec        TEXT    NOT NULL,        -- cron spec or @every descriptor, UTC (see jobs.go)
+    prompt      TEXT    NOT NULL,
+    workdir     TEXT    NOT NULL,
+    cap_usd     REAL    NOT NULL,        -- per-run spend reservation (§4.4)
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    next_run    INTEGER NOT NULL,
+    last_run    INTEGER NOT NULL DEFAULT 0,
+    last_status TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_due ON jobs(enabled, next_run);`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}

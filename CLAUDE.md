@@ -175,6 +175,40 @@ Session continuity: `/new` and `/cd` clear
 on init routes hook approvals back to the right chat — a fresh session's id is
 generated bridge-side and stored *before* the first tool call can fire.
 
+**Session history is bookkeeping, not a second session store** (§6,
+PLAN-4-SESSION-HISTORY.md). `session_history` remembers ids the `sessions` table
+has moved off, so `/new`/`/cd` stop being lossy; `sessions` is still the only
+thing that says what a key is on *now*. Three rules carry it: `/resume` restores
+the row's **workdir** with its id (project-scoped sessions — an id alone would
+resume another project's conversation) and re-jails it through `resolveDir`,
+refusing rather than relocating; it's refused while `b.runs` holds the key,
+because swapping the id under a live turn corrupts the approval routing
+`GetByClaudeSession` depends on; and "fresh session" for the recording hook is
+read off **`runReq.ClaudeSessionID`**, not `sess` — the dead-session retry
+re-runs with the id cleared, and that new session must be recorded too. Rows are
+per key, so job sessions (negative thread id) never leak into a chat's listing —
+that's the filtering, no predicate needed. Both dead-id paths (a failed fresh
+turn, a resume of a session gone from disk) delete the history row, so `/resume`
+never offers a ghost.
+
+**Jobs are sessions, not a parallel machine** (§6.1, PLAN-3-JOBS.md). A job's
+turns run under `store.JobKey` = `(chat, -jobID, bot)` — negative because real
+chats are thread 0 and forum topics would be positive. That synthetic key is
+what buys approval routing, session continuity, and the busy gate for free;
+don't "simplify" jobs onto the chat's own key, it would clobber the interactive
+session's context. The scheduler is its own goroutine off `Run` and `go`-spawns
+each turn (the poll-loop rule). Two orderings are load-bearing: `next_run` is
+persisted **before** the turn launches (crash ⇒ a missed run, never a double —
+fail closed covers money), and a busy key skips the occurrence *without*
+advancing `next_run` so the next tick retries. `runTurn` needs the job's session
+row to already exist — `b.session` would invent chat defaults for a synthetic
+key, hence `ensureJobSession`; it seeds the **config default tier**, not the
+chat's current one. The per-job `cap_usd` is a pre-flight reservation only (the
+CLI reports cost at the result event), so the daily budget guard stays the
+backstop — say so in help text rather than implying a mid-turn kill. `/stop`
+sweeps `b.runs` by **chat** (`takeStops`), not by key, so it reaches job turns
+too; keep that if you touch it — a card the user can see must be stoppable.
+
 **Model/effort are per-session** (stored on `store.Session`, empty ⇒ config
 default). `/model` and `/effort` set them; `agent.Run` resolves the fallback to
 `cfg.Model`/`cfg.Effort` — the bridge just passes `sess.Model`/`sess.Effort`
