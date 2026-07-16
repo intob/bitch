@@ -40,3 +40,34 @@ func writeSettings(path, exe string) error {
 	}
 	return nil
 }
+
+// writeMCPConfig emits the --mcp-config JSON that registers the `bitch mcp`
+// stdio server (§4.7): the tools the child Claude uses to capture credentials
+// and facts the user provides. Paired with --strict-mcp-config on the CLI so
+// only this server is loaded — a .mcp.json smuggled into a cloned repo is
+// ignored. The server reaches the bridge over the loopback, so it needs the
+// hook addr/secret in its env; they're passed explicitly here (and also present
+// in the inherited child env) so the subprocess can authenticate.
+func writeMCPConfig(path, exe, hookAddr, hookSecret string) error {
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"bitch": map[string]any{
+				"type":    "stdio",
+				"command": exe,
+				"args":    []any{"mcp"},
+				"env": map[string]any{
+					"BITCH_HOOK_ADDR":   hookAddr,
+					"BITCH_HOOK_SECRET": hookSecret,
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("agent: marshal mcp config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("agent: write mcp config: %w", err)
+	}
+	return nil
+}

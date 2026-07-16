@@ -24,9 +24,10 @@ import (
 
 // Runner spawns Claude Code processes. One Runner is shared across all chats.
 type Runner struct {
-	cfg          *config.Config
-	exe          string // path to this bitch binary (for the hook subcommand)
-	settingsPath string // pre-written settings.json wiring the PreToolUse hook
+	cfg           *config.Config
+	exe           string // path to this bitch binary (for the hook + mcp subcommands)
+	settingsPath  string // pre-written settings.json wiring the PreToolUse hook
+	mcpConfigPath string // pre-written --mcp-config registering the `bitch mcp` server (§4.7)
 }
 
 // New creates a Runner and writes the shared settings.json that installs the
@@ -47,7 +48,13 @@ func New(cfg *config.Config, exe string) (*Runner, error) {
 	if err := writeSettings(settingsPath, exe); err != nil {
 		return nil, err
 	}
-	return &Runner{cfg: cfg, exe: exe, settingsPath: settingsPath}, nil
+	// Register the credential/fact capture MCP server (§4.7). The hook secret is
+	// resolved by now (bridge.New generates it before constructing the Runner).
+	mcpConfigPath := filepath.Join(stateDir, "mcp.json")
+	if err := writeMCPConfig(mcpConfigPath, exe, cfg.HookAddr, cfg.HookSecret); err != nil {
+		return nil, err
+	}
+	return &Runner{cfg: cfg, exe: exe, settingsPath: settingsPath, mcpConfigPath: mcpConfigPath}, nil
 }
 
 // RunRequest describes one agent turn.
@@ -111,6 +118,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 		"--model", model,
 		"--permission-mode", "default", // the hook is authoritative (§4.6)
 		"--settings", r.settingsPath,
+		// Register only our capture MCP server (§4.7); strict mode ignores any
+		// ambient MCP config, including a .mcp.json inside a cloned repo.
+		"--mcp-config", r.mcpConfigPath,
+		"--strict-mcp-config",
 	}
 	if ef := config.NormalizeEffort(effort); ef != "" {
 		args = append(args, "--effort", ef)

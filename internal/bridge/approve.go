@@ -45,6 +45,7 @@ type hookResponse struct {
 func (b *Bridge) serveApprovals(ctx context.Context, ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/approve", b.handleApprove)
+	mux.HandleFunc("/store", b.handleStore)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

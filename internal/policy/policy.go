@@ -5,6 +5,7 @@
 package policy
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -101,8 +102,14 @@ func Evaluate(r Request, within WithinRoots) Verdict {
 
 	default:
 		// Unknown / MCP / Task tools: fail closed. Auto only at full autonomy.
-		action := tool + ": " + oneLine(compactInput(r.Input))
-		return riskyVerdict(r.Tier, action, compactInput(r.Input))
+		// Redact the value of a secret-capture tool so the approval card (and the
+		// deny reason fed back to the model) never echoes the credential (§4.7).
+		detail := compactInput(r.Input)
+		if isSecretCaptureTool(tool) {
+			detail = compactInputMasking(r.Input, "value")
+		}
+		action := tool + ": " + oneLine(detail)
+		return riskyVerdict(r.Tier, action, detail)
 	}
 }
 
@@ -371,13 +378,37 @@ func editDetail(in map[string]any) string {
 }
 
 func compactInput(in map[string]any) string {
+	return compactInputMasking(in)
+}
+
+// compactInputMasking renders the input like compactInput but replaces the
+// value of any key in mask with a length-only placeholder, so a secret never
+// lands verbatim on an approval card or in a deny reason (§4.7).
+func compactInputMasking(in map[string]any, mask ...string) string {
+	masked := make(map[string]bool, len(mask))
+	for _, k := range mask {
+		masked[k] = true
+	}
 	parts := make([]string, 0, len(in))
 	for k, v := range in {
-		if s, ok := v.(string); ok {
-			parts = append(parts, k+"="+oneLine(s))
+		s, ok := v.(string)
+		if !ok {
+			continue
 		}
+		if masked[k] {
+			parts = append(parts, fmt.Sprintf("%s=•••(%d chars)", k, len(s)))
+			continue
+		}
+		parts = append(parts, k+"="+oneLine(s))
 	}
 	return strings.Join(parts, " ")
+}
+
+// isSecretCaptureTool reports whether tool is the agent-driven secret-capture
+// MCP tool, whose value argument must be redacted from any human-facing summary.
+// Matches the tail so it's robust to the mcp__<server>__ prefixing.
+func isSecretCaptureTool(tool string) bool {
+	return strings.HasSuffix(tool, "save_secret")
 }
 
 func oneLine(s string) string {

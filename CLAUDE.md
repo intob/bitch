@@ -30,8 +30,11 @@ Telegram user → bridge poll loop (bridge.Run)
   → handleAgentTurn (own goroutine, one per chat via b.runs)
     → agent.Runner.Run spawns: claude -p --output-format stream-json
                                --resume <id> --settings <generated settings.json>
+                               --mcp-config <generated mcp.json> --strict-mcp-config
       → every tool call fires PreToolUse hook → `bitch hook` subprocess
         → POST 127.0.0.1:8765/approve (shared secret)
+      → capture tools (save_secret/remember_fact) via `bitch mcp` subprocess
+        → POST 127.0.0.1:8765/store (shared secret) after the gate approves
           → bridge.decide → policy.Evaluate → Allow / Deny / Ask
             → Ask: approval card in Telegram, blocks until ✅/❌ or timeout(deny)
     → stream events → status message edits + chunked HTML replies
@@ -106,8 +109,16 @@ read error (the agent just re-asks) — never abort a turn over recall.
 `deploy/setup.sh` (currently 2.1.210) must match what the code was tested
 against. The coupled surfaces: stream-json event shapes (`agent.streamEvent`),
 the PreToolUse stdin payload + `hookSpecificOutput.permissionDecision` output
-(`cmd/bitch/hook.go`), and flags `--session-id/--resume/--effort/--settings`.
-When bumping the pin: rerun `TestScan`, then a live turn with an approval.
+(`cmd/bitch/hook.go`), the stdio **MCP** JSON-RPC contract (`cmd/bitch/mcp.go`:
+`initialize`/`tools/list`/`tools/call`) + the `--mcp-config` file shape
+(`agent.writeMCPConfig`), and flags
+`--session-id/--resume/--effort/--settings/--mcp-config/--strict-mcp-config`.
+When bumping the pin: rerun `TestScan`, then a live turn with an approval, **and**
+confirm the agent-capture path still gates — the whole safety of agent-driven
+`save_secret`/`remember_fact` rests on the PreToolUse hook firing for MCP tools
+(so the save asks over Telegram before it runs). If a CLI bump stops firing hooks
+for MCP tools, agent-driven saves would become unconfirmed — treat that as a
+release blocker, not a nicety.
 The bridge preflights `claude --version` at boot — keep that.
 
 **Process lifecycle:** claude runs in its own process group; cancel kills the

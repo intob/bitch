@@ -241,10 +241,12 @@ Building **1–3 + 5 + 6 now** (the tested core); **4 deferred**.
    manifest to the prompt. Re-validate names in `childEnv` (defense in depth).
    Extend the childEnv scrubbing test: `BITCH_TELEGRAM_TOKEN` still absent; a secret
    named `LD_PRELOAD`/`PATH`/`BASH_ENV` is **not** injected.
-4. **[DEFERRED] MCP secrets server** — `bitch mcp-secrets` subcommand registered in
-   `settings.go`, `secret_save`/`secret_list` over the loopback, `secret_save`
-   Ask-gated. Version-coupled + only live-testable; ship after the core proves out.
-   (Never a value-returning tool — §6.)
+4. **[DONE] MCP capture server** — `bitch mcp` subcommand (`cmd/bitch/mcp.go`),
+   registered via `agent.writeMCPConfig` + `--mcp-config`/`--strict-mcp-config`.
+   Exposes `save_secret` and `remember_fact`; persists via the loopback `/store`
+   endpoint. Confirmation reuses the PreToolUse gate (the tool call is Ask at
+   T1/T2) rather than a new blocking flow, with the secret value redacted from the
+   card (`policy.isSecretCaptureTool`). No value-returning tool — §6 holds.
 5. **`/secrets` management command** (`bridge/commands.go`): `/secrets` lists
    names+descriptions; `/secrets set NAME value` saves (validates the name; on
    success `deleteMessage` to scrub the plaintext from Telegram, §6); `/secrets rm

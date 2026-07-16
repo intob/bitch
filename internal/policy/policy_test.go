@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,6 +139,38 @@ func TestEvaluateTiers(t *testing.T) {
 	// Killing the agent's own background shell is inert.
 	if v := Evaluate(req("KillBash", 1, map[string]any{"shell_id": "x"}), within); v.Decision != Allow {
 		t.Errorf("KillBash T1: got %v", v.Decision)
+	}
+}
+
+// TestSecretCaptureRedaction proves the save_secret MCP tool's value never
+// lands on the approval card / deny reason, while a non-secret fact stays
+// visible so the user can eyeball it (§4.7).
+func TestSecretCaptureRedaction(t *testing.T) {
+	within := func(string) bool { return true }
+
+	v := Evaluate(Request{
+		Tool:  "mcp__bitch__save_secret",
+		Input: map[string]any{"name": "STRIPE_KEY", "value": "sk_live_supersecret"},
+		Tier:  1,
+	}, within)
+	if v.Decision != Ask {
+		t.Fatalf("save_secret at T1: got %v, want Ask", v.Decision)
+	}
+	if strings.Contains(v.Action+v.Detail, "sk_live_supersecret") {
+		t.Errorf("secret value leaked into approval summary: action=%q detail=%q", v.Action, v.Detail)
+	}
+	if !strings.Contains(v.Detail, "STRIPE_KEY") {
+		t.Errorf("secret name should still be shown: %q", v.Detail)
+	}
+
+	// A fact keeps its value visible (non-secret; helps catch a poisoned save).
+	vf := Evaluate(Request{
+		Tool:  "mcp__bitch__remember_fact",
+		Input: map[string]any{"key": "email", "value": "joey@rmrf.uk"},
+		Tier:  1,
+	}, within)
+	if !strings.Contains(vf.Detail, "joey@rmrf.uk") {
+		t.Errorf("fact value should be visible on the card: %q", vf.Detail)
 	}
 }
 

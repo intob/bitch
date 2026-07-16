@@ -1,10 +1,12 @@
 // Command bitch is the Telegram↔Claude-Code bridge described in DESIGN.md.
 //
-// Two subcommands:
+// Subcommands:
 //
 //	bitch serve   run the bridge (default): Telegram poll loop + agent turns.
 //	bitch hook    PreToolUse permission hook; invoked by Claude Code, it calls
 //	              back into the running bridge to apply the tier policy (§4.3).
+//	bitch mcp     stdio MCP server; spawned by Claude Code to let the agent
+//	              capture credentials/facts the user provides (§4.7).
 package main
 
 import (
@@ -28,10 +30,12 @@ func main() {
 	switch cmd {
 	case "hook":
 		os.Exit(runHook())
+	case "mcp":
+		os.Exit(runMCP())
 	case "serve":
 		runServe()
 	case "-h", "--help", "help":
-		fmt.Fprintln(os.Stderr, "usage: bitch [serve|hook]")
+		fmt.Fprintln(os.Stderr, "usage: bitch [serve|hook|mcp]")
 	default:
 		// No subcommand — default to serve (systemd invokes `bitch` bare).
 		runServe()

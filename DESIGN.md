@@ -235,9 +235,17 @@ detailed plan; `internal/store/secrets.go`, `internal/bridge/secrets.go`):
   suspicion. There is deliberately **no** value-returning path back to the agent
   (no `secret_get`) — the loopback shared secret is in the child env, so such a
   path would be an unauthenticated vault read from inside the sandbox.
-- **v1 capture is manual** (`/secrets set NAME value`, which self-deletes the
-  plaintext message); a seamless agent-driven MCP capture tool is deferred because
-  it is CLI-version-coupled and only live-testable.
+- **Capture is both manual and agent-driven.** Manual: `/secrets set NAME value`
+  (self-deletes the plaintext message). Agent-driven: a `bitch mcp` stdio MCP
+  server (registered via `--mcp-config` + `--strict-mcp-config`, so a `.mcp.json`
+  smuggled into a cloned repo is ignored) gives the child a `save_secret` tool it
+  calls when you paste a credential mid-task — no command needed. That tool call
+  is an "unknown tool" at the gate, so it goes through the **normal Telegram
+  approval** before it runs (Ask at T1/T2), with the value **redacted** on the
+  card; on ✅ the MCP server persists via the loopback `/store` endpoint. This
+  keeps the human in the loop for every agent-initiated save without new blocking
+  machinery. (Assumes the PreToolUse hook fires for MCP tools — verify live when
+  bumping the CLI pin.)
 
 **Non-secret recall — facts.** Alongside the vault is a lighter store for
 information that is *not* sensitive: email addresses, usernames, handles,
@@ -249,7 +257,9 @@ directly — that's the point), and their key needs only sanity validation (no
 env-var/code-exec concern). Managed with `/remember KEY value`, `/forget KEY`, and
 `/remember` (no args) to list. The per-turn preamble concatenates the facts block
 (values inline) above the vault manifest (names only). `internal/store/facts.go`,
-`internal/bridge/facts.go`.
+`internal/bridge/facts.go`. The same `bitch mcp` server exposes a `remember_fact`
+tool so the agent can capture a fact itself (also gated by the approval card,
+value shown since it's non-secret — which lets you catch a poisoned save).
 
 ---
 
