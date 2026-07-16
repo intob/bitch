@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,9 +34,10 @@ func TestNewSettingsPathAbsolute(t *testing.T) {
 func TestScan(t *testing.T) {
 	transcript := strings.Join([]string{
 		`{"type":"system","subtype":"init","session_id":"sess-1"}`,
-		`{"type":"assistant","message":{"content":[{"type":"thinking"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"thinking"}],"usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":1000,"cache_read_input_tokens":5000}}}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go test ./...\necho done"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"go test ./...\necho done"}}],"usage":{"input_tokens":50,"output_tokens":30}}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true}]}}`,
 		`not json — must be ignored`,
 		``,
 		`{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.42,"session_id":"sess-1","result":"final answer"}`,
@@ -44,6 +46,8 @@ func TestScan(t *testing.T) {
 	var (
 		inits, thinks int
 		texts, tools  []string
+		results       []string
+		used          Usage
 	)
 	cb := Callbacks{
 		OnInit: func(id string) {
@@ -52,9 +56,18 @@ func TestScan(t *testing.T) {
 				t.Errorf("init id = %q", id)
 			}
 		},
-		OnText:     func(s string) { texts = append(texts, s) },
-		OnToolUse:  func(name, summary string) { tools = append(tools, name+":"+summary) },
+		OnText:    func(s string) { texts = append(texts, s) },
+		OnToolUse: func(id, name, summary string) { tools = append(tools, id+":"+name+":"+summary) },
+		OnToolResult: func(id string, isError bool) {
+			results = append(results, fmt.Sprintf("%s:%t", id, isError))
+		},
 		OnThinking: func() { thinks++ },
+		OnUsage: func(u Usage) {
+			used.InputTokens += u.InputTokens
+			used.OutputTokens += u.OutputTokens
+			used.CacheCreationInputTokens += u.CacheCreationInputTokens
+			used.CacheReadInputTokens += u.CacheReadInputTokens
+		},
 	}
 
 	r := &Runner{}
@@ -70,8 +83,19 @@ func TestScan(t *testing.T) {
 		t.Errorf("texts = %q", texts)
 	}
 	// Multi-line bash commands are summarized to their first line.
-	if len(tools) != 1 || tools[0] != "Bash:go test ./... …" {
+	if len(tools) != 1 || tools[0] != "toolu_1:Bash:go test ./... …" {
 		t.Errorf("tools = %q", tools)
+	}
+	if len(results) != 1 || results[0] != "toolu_1:true" {
+		t.Errorf("tool results = %q", results)
+	}
+	// Usage sums across assistant events; the second text-only event carries
+	// no usage object and must not fire the callback with zeros.
+	if used != (Usage{InputTokens: 150, OutputTokens: 50, CacheCreationInputTokens: 1000, CacheReadInputTokens: 5000}) {
+		t.Errorf("usage = %+v", used)
+	}
+	if used.Total() != 6200 {
+		t.Errorf("usage total = %d, want 6200", used.Total())
 	}
 	if result.SessionID != "sess-1" || result.Text != "final answer" ||
 		result.CostUSD != 0.42 || result.NumTurns != 3 || result.IsError {

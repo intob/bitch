@@ -44,7 +44,7 @@ Telegram user → bridge poll loop (bridge.Run)
         → POST 127.0.0.1:8765/store (shared secret) after the gate approves
           → bridge.decide → policy.Evaluate → Allow / Deny / Ask
             → Ask: approval card in Telegram, blocks until ✅/❌ or timeout(deny)
-    → stream events → status message edits + chunked HTML replies
+    → stream events → live activity card edits (turnCard, §7) + chunked HTML replies
     → result event → cost recorded (budget guard), session id persisted
 ```
 
@@ -134,7 +134,11 @@ whole group (`-pgid`) so `/stop` can't orphan tool children running as root.
 
 **Telegram discipline:** HTML parse mode only; every reply goes through
 `tg.Chunk` (never split a code fence, budget 3900); `Status` self-throttles
-edits (editGap); sends retry once before the plain-text fallback; replies
+edits (editGap) and is finalized in place at turn end (`Finish`, never
+deleted — the activity card is the turn's record, §7); the card's cost
+estimate is display-only (price table in `turncard.go` — update it when
+prices change; the budget guard uses the CLI's `total_cost_usd`); sends retry
+once before the plain-text fallback; replies
 >12 kB (`docThreshold`) go as document attachments. `tgbotapi` v5.5.1 is
 unmaintained and does not retry 429s — the retry/throttle layers compensate;
 don't remove them. Forum topics aren't supported by this lib version, so

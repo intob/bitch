@@ -86,10 +86,29 @@ type Result struct {
 // Callbacks receive streaming events so the bridge can update the Telegram
 // status message (§7). All are optional and called from the Run goroutine.
 type Callbacks struct {
-	OnInit     func(sessionID string) // fired once on the init event
-	OnText     func(text string)      // an assistant text block completed
-	OnToolUse  func(name, summary string)
-	OnThinking func()
+	OnInit       func(sessionID string) // fired once on the init event
+	OnText       func(text string)      // an assistant text block completed
+	OnToolUse    func(id, name, summary string)
+	OnToolResult func(toolUseID string, isError bool) // a tool_use resolved
+	OnThinking   func()
+	OnUsage      func(u Usage) // per-assistant-message token accounting
+}
+
+// Usage is the token accounting attached to each assistant message event. One
+// assistant event corresponds to one API call, so summing Usage across a turn
+// gives the turn's running totals (§7). It feeds the live cost estimate on the
+// status card only — the authoritative USD cost is the result event's
+// total_cost_usd, which the budget guard uses.
+type Usage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// Total is the all-in token count (input + output + both cache classes).
+func (u Usage) Total() int {
+	return u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 // Run executes one turn, streaming events to cb, and returns the final Result.
@@ -235,7 +254,20 @@ func (r *Runner) dispatch(ev streamEvent, cb Callbacks, result *Result) {
 				}
 			case "tool_use":
 				if cb.OnToolUse != nil {
-					cb.OnToolUse(block.Name, summarizeToolUse(block.Name, block.Input))
+					cb.OnToolUse(block.ID, block.Name, summarizeToolUse(block.Name, block.Input))
+				}
+			}
+		}
+		if cb.OnUsage != nil && ev.Message.Usage != (Usage{}) {
+			cb.OnUsage(ev.Message.Usage)
+		}
+	case "user":
+		// Tool results come back as user-role events; they resolve the pending
+		// tool_use lines on the status card (§7).
+		if cb.OnToolResult != nil {
+			for _, block := range ev.Message.Content {
+				if block.Type == "tool_result" {
+					cb.OnToolResult(block.ToolUseID, block.IsError)
 				}
 			}
 		}
@@ -340,13 +372,17 @@ type streamEvent struct {
 
 type assistantMsg struct {
 	Content []contentBlock `json:"content"`
+	Usage   Usage          `json:"usage"`
 }
 
 type contentBlock struct {
-	Type  string         `json:"type"`
-	Text  string         `json:"text"`
-	Name  string         `json:"name"`
-	Input map[string]any `json:"input"`
+	Type      string         `json:"type"`
+	ID        string         `json:"id"` // tool_use id, correlates with tool_result
+	Text      string         `json:"text"`
+	Name      string         `json:"name"`
+	Input     map[string]any `json:"input"`
+	ToolUseID string         `json:"tool_use_id"` // set on tool_result blocks
+	IsError   bool           `json:"is_error"`
 }
 
 // summarizeToolUse builds a compact one-liner for the status message (§7).

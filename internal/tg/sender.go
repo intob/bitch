@@ -94,6 +94,7 @@ type Status struct {
 	want     string // latest desired text
 	lastEdit time.Time
 	timer    *time.Timer // pending deferred flush, nil if none
+	done     bool        // Finish was called; further Sets are no-ops
 }
 
 // editGap is the minimum interval between edits of the status message.
@@ -116,6 +117,9 @@ func (st *Status) Set(html string) {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if st.done {
+		return
+	}
 	st.want = html
 	if st.timer != nil {
 		return // a flush is already scheduled; it will pick up want
@@ -131,7 +135,39 @@ func (st *Status) flush() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.timer = nil
+	if st.done {
+		return
+	}
 	st.edit(st.want)
+}
+
+// Finish rewrites the status message one last time and leaves it in place as
+// the turn's permanent activity record (§7). It bypasses the edit throttle —
+// the turn is over, no further edits will follow — and retries once so a
+// transient 429 doesn't strand a stale "working…" card. After Finish, Set and
+// any pending deferred flush become no-ops.
+func (st *Status) Finish(html string) {
+	if st == nil || html == "" {
+		return
+	}
+	st.mu.Lock()
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	st.done = true
+	skip := html == st.last
+	st.mu.Unlock()
+	if skip {
+		return
+	}
+	edit := tgbotapi.NewEditMessageText(st.chatID, st.msgID, html)
+	edit.ParseMode = tgbotapi.ModeHTML
+	edit.DisableWebPagePreview = true
+	if _, err := st.s.bot.Send(edit); err != nil {
+		time.Sleep(rateGap)
+		_, _ = st.s.bot.Send(edit)
+	}
 }
 
 // edit performs the API call. Callers must hold st.mu.

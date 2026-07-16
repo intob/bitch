@@ -306,10 +306,19 @@ works regardless of where you (or the laptop) are.
 
 - **4096-char message limit:** chunk long replies on newline / code-fence
   boundaries; never split mid-fence.
-- **Streaming, not silence:** parse Claude Code's `stream-json` output (or the
-  SDK stream) and edit a single status message ("🔧 running tests…") via
-  `editMessageText` rather than spamming — respects Telegram's ~1 msg/sec/chat
-  rate limit.
+- **Streaming, not silence:** parse Claude Code's `stream-json` output and edit
+  a single status message via `editMessageText` rather than spamming — respects
+  Telegram's ~1 msg/sec/chat rate limit. The status message is a live
+  **activity card** (`bridge.turnCard`): a rolling feed of the last 8 tool
+  calls, each appearing ⏳ when the `tool_use` block streams and resolving to
+  ✅/❌ when its `tool_result` comes back (correlated by tool_use id), headed by
+  elapsed time, summed token usage from per-message `usage`, and a running cost
+  estimate (`~$…`, static price table; display-only — the budget guard §4.4
+  still uses the result event's `total_cost_usd`). A 5s ticker re-renders so
+  the clock moves during long tool runs; `tg.Status` throttles actual edits.
+  When the turn ends the card is **finalized in place, not deleted** — outcome
+  header (✅ done / 🛑 stopped / ⚠️ failed) plus final time/tokens/cost — so the
+  chat keeps a record of what the agent did.
 - **Formatting:** use **HTML parse mode** (`<pre>`, `<code>`, `<b>`) — more
   forgiving for arbitrary agent output than MarkdownV2.
 - **Big artifacts** (long diffs, files, logs) → send as a **document attachment**.
@@ -325,6 +334,13 @@ works regardless of where you (or the laptop) are.
 - **Logging** to `journald` (`journalctl -u bitch`).
 - On crash/restart, in-flight Telegram updates are re-fetched; a partially
   completed agent turn is reported as interrupted rather than silently lost.
+- **Boot notice:** once the boot is genuinely healthy (Telegram login, CLI
+  preflight, approval server listening), the bridge messages every allowlisted
+  user: `🟢 online — bitch <commit> · claude <version> · <model>`. The commit
+  comes from the Go toolchain's automatic VCS stamping (`buildRevision`,
+  `+dirty` for modified-tree builds) — deploys confirm themselves, and a
+  systemd crash-restart pings too, which is a signal worth having. Best-effort:
+  a failed send never blocks the boot.
 
 ---
 

@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -84,8 +86,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("bitch online as @%s (id %d); %d allowed user(s); tier default T%d; model %s; claude %s",
-		b.bot.Self.UserName, b.botID, len(b.cfg.AllowedUsers), b.cfg.DefaultTier, b.cfg.Model, version)
+	rev := buildRevision()
+	log.Printf("bitch %s online as @%s (id %d); %d allowed user(s); tier default T%d; model %s; claude %s",
+		rev, b.bot.Self.UserName, b.botID, len(b.cfg.AllowedUsers), b.cfg.DefaultTier, b.cfg.Model, version)
 
 	// Loopback callback server for the permission hook. Listen synchronously so
 	// a bad HookAddr fails startup instead of dying inside a goroutine.
@@ -94,6 +97,15 @@ func (b *Bridge) Run(ctx context.Context) error {
 		return fmt.Errorf("bridge: approval server listen %s: %w", b.cfg.HookAddr, err)
 	}
 	go b.serveApprovals(ctx, ln)
+
+	// Boot notice to the human (§8): confirms a deploy (or crash restart —
+	// systemd restarts land here too, which is a signal worth having) came back
+	// up, and pins the running commit. For 1:1 chats the chat id equals the
+	// user id, so the allowlist doubles as the recipient list. Best-effort:
+	// a failed send must never block the boot.
+	for _, uid := range b.cfg.AllowedUsers {
+		b.reply(uid, fmt.Sprintf("🟢 online — bitch %s · claude %s · %s", rev, version, b.cfg.Model))
+	}
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 50 // long-poll; messages queue on Telegram during downtime (§3)
@@ -207,7 +219,16 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		}
 	}
 
-	status, _ := b.sender.NewStatus(msg.Chat.ID, "🤔 thinking…")
+	status, _ := b.sender.NewStatus(msg.Chat.ID, stateThinking)
+
+	// The live activity card (§7): per-tool lines, elapsed time, tokens, and a
+	// running cost estimate. Model resolution mirrors agent.Run so the price
+	// table sees the id the CLI will actually bill.
+	model := sess.Model
+	if model == "" {
+		model = b.cfg.Model
+	}
+	card := newTurnCard(model)
 
 	var sentText bool
 	cb := agent.Callbacks{
@@ -223,15 +244,40 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 			sentText = true
 			b.sendReply(msg.Chat.ID, text)
 		},
-		OnToolUse: func(name, summary string) {
-			s := "🔧 " + name
-			if summary != "" {
-				s += ": " + tgEscape(summary)
-			}
-			status.Set(s)
+		OnToolUse: func(id, name, summary string) {
+			card.StartTool(id, name, summary)
+			status.Set(card.Render())
 		},
-		OnThinking: func() { status.Set("💭 thinking…") },
+		OnToolResult: func(id string, isError bool) {
+			card.FinishTool(id, isError)
+			status.Set(card.Render())
+		},
+		OnUsage: func(u agent.Usage) {
+			card.AddUsage(u)
+			status.Set(card.Render())
+		},
+		OnThinking: func() {
+			card.SetState(stateThinking)
+			status.Set(card.Render())
+		},
 	}
+
+	// Keep the card's clock and cost ticking during long tool runs: re-render
+	// on a timer even when no stream events arrive. Status throttles the
+	// actual Telegram edits, so this costs at most one edit per editGap.
+	tickDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-tickDone:
+				return
+			case <-t.C:
+				status.Set(card.Render())
+			}
+		}
+	}()
 
 	// Recall preamble: non-secret facts (values inline) plus the credential-vault
 	// manifest (secret names only; values go into the env). Both let the agent
@@ -269,7 +315,19 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		_ = b.store.SetClaudeSession(key, "")
 	}
 
-	status.Delete()
+	close(tickDone)
+
+	// Finalize the card in place instead of deleting it — the resolved feed
+	// plus final time/tokens/cost is the turn's activity record (§7). The
+	// result event's cost is authoritative; the estimate stands in on failure.
+	switch {
+	case err != nil && runCtx.Err() != nil:
+		status.Finish(card.RenderFinal("🛑 stopped", nil))
+	case err != nil:
+		status.Finish(card.RenderFinal("⚠️ failed", nil))
+	default:
+		status.Finish(card.RenderFinal("✅ done", res))
+	}
 
 	if err != nil {
 		if runCtx.Err() != nil {
@@ -331,6 +389,36 @@ func tgEscape(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+// buildRevision returns the short git commit the binary was built from, via
+// the Go toolchain's automatic VCS stamping — no ldflags plumbing in the build
+// scripts to keep in sync. "+dirty" marks a build from a modified tree;
+// "unknown" means the build had no VCS info (e.g. `go run` from a tarball).
+func buildRevision() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, modified := "", false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	if modified {
+		rev += "+dirty"
+	}
+	return rev
 }
 
 func randHex(n int) string {
