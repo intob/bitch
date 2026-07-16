@@ -16,6 +16,7 @@ sessions/
 logs/
 
 # Dependencies / build
+/bitch
 node_modules/
 dist/
 build/
