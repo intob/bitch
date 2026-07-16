@@ -92,6 +92,16 @@ fixed, non-configurable `/etc/bitch/secrets.db` (a movable path would escape the
 static `/etc/bitch` deny and fail open). Never add a path that returns a value
 back to the agent (no `secret_get`).
 
+**Recall has two stores; don't conflate them** (§4.7). The **vault** (secrets,
+above) is for sensitive values — env-injected, values never in the manifest,
+strict `ValidSecretName`, separate deny-listed DB. **Facts**
+(`internal/store/facts.go`, `/remember`/`/forget`) are for non-secret recall
+(email, usernames) — plaintext values injected straight into the prompt preamble,
+stored in the ordinary session DB, only sanity key-validation. If a value would
+be harmful to print into a transcript, it's a secret, not a fact. The per-turn
+preamble is `joinPreamble(factsBlock, secretsManifest)`; both are fail-open on a
+read error (the agent just re-asks) — never abort a turn over recall.
+
 **The CLI is pinned and version-coupled.** `CLAUDE_VERSION` in
 `deploy/setup.sh` (currently 2.1.210) must match what the code was tested
 against. The coupled surfaces: stream-json event shapes (`agent.streamEvent`),

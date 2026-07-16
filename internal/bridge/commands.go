@@ -47,6 +47,10 @@ func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string
 		b.cmdCd(msg, key, arg)
 	case "/secrets", "/secret":
 		b.cmdSecrets(msg, arg)
+	case "/remember":
+		b.cmdRemember(msg, arg)
+	case "/forget":
+		b.cmdForget(msg, arg)
 	case "/status":
 		b.cmdStatus(msg, key)
 	default:
@@ -62,6 +66,8 @@ const helpText = `bitch — commands:
 /effort <level> — set effort (low|medium|high|xhigh|max; "default" to reset)
 /stop — cancel the current turn
 /secrets — list stored credentials; /secrets set NAME value to store one, /secrets rm NAME to delete
+/remember [KEY value] — recall non-secret facts (email, usernames); no args lists them
+/forget KEY — drop a remembered fact
 /status — session, dir, tier, model, effort, today's spend
 Anything else is sent to the agent.`
 

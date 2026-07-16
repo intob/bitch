@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS secrets (
     description TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    key        TEXT NOT NULL PRIMARY KEY, -- short label, e.g. "email" (validated, see facts.go)
+    value      TEXT NOT NULL,             -- non-secret recall value, injected into the prompt
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)

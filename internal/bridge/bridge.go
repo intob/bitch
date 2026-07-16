@@ -233,10 +233,12 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		OnThinking: func() { status.Set("💭 thinking…") },
 	}
 
-	// Credential vault (§4.7): inject stored secrets as env vars and tell the
-	// agent which vars exist so it doesn't re-ask. A vault error is non-fatal —
-	// fail-closed means inject nothing and let the agent ask, not abort the turn.
-	secretVals, manifest := b.vaultForTurn()
+	// Recall preamble: non-secret facts (values inline) plus the credential-vault
+	// manifest (secret names only; values go into the env). Both let the agent
+	// reuse things the user provided once instead of re-asking. Vault/fact read
+	// errors are non-fatal — worst case the agent asks; a turn is never aborted.
+	secretVals, secretsManifest := b.vaultForTurn()
+	manifest := joinPreamble(b.factsBlock(), secretsManifest)
 
 	runReq := agent.RunRequest{
 		Prompt:          prompt,

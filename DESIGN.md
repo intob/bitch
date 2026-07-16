@@ -239,6 +239,18 @@ detailed plan; `internal/store/secrets.go`, `internal/bridge/secrets.go`):
   plaintext message); a seamless agent-driven MCP capture tool is deferred because
   it is CLI-version-coupled and only live-testable.
 
+**Non-secret recall — facts.** Alongside the vault is a lighter store for
+information that is *not* sensitive: email addresses, usernames, handles,
+preferences — things the agent asks for once and shouldn't have to ask again, but
+which don't belong in a credential vault. Facts differ from secrets on every axis:
+they live in the ordinary session DB (not the deny-listed vault), their **values
+are injected as plaintext into the prompt preamble** (so the agent reads them
+directly — that's the point), and their key needs only sanity validation (no
+env-var/code-exec concern). Managed with `/remember KEY value`, `/forget KEY`, and
+`/remember` (no args) to list. The per-turn preamble concatenates the facts block
+(values inline) above the vault manifest (names only). `internal/store/facts.go`,
+`internal/bridge/facts.go`.
+
 ---
 
 ## 5. The host: Hetzner VPS (always-on)
