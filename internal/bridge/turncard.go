@@ -11,7 +11,8 @@ import (
 
 // turnCard is the live activity model behind the status message (§7): a
 // rolling feed of tool calls that resolve to ✅/❌ as their results stream in,
-// plus elapsed time, token totals, and a running cost estimate — an RC-style
+// plus elapsed time, a sent/received/cached token split, and a running cost
+// estimate — an RC-style
 // real-time view of the turn, inside Telegram. The agent callbacks mutate it
 // and a ticker re-renders it so the clock keeps moving during long tool runs;
 // tg.Status throttles the actual edits. When the turn ends the card is
@@ -117,8 +118,8 @@ func (c *turnCard) RenderFinal(outcome string, res *agent.Result) string {
 // the estimate (final render); otherwise the estimate is shown with a ~.
 func (c *turnCard) render(header string, actualCost float64) string {
 	parts := []string{header, fmtDuration(time.Since(c.start))}
-	if t := c.used.Total(); t > 0 {
-		parts = append(parts, fmtTokens(t)+" tok")
+	if u := fmtUsage(c.used); u != "" {
+		parts = append(parts, u)
 	}
 	if actualCost > 0 {
 		parts = append(parts, fmt.Sprintf("$%.2f", actualCost))
@@ -174,6 +175,36 @@ func estimateCost(model string, u agent.Usage) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// fmtUsage renders the turn's token accounting as "12k↑ 2k↓ 370k cached".
+//
+// The split is the point (§7). Every API call in a turn re-sends the whole
+// context, so on a multi-step turn the replayed context dominates the all-in
+// total — a single summed figure reads as a runaway when it's mostly cache
+// reads at 0.1× price. Splitting it also surfaces the one number worth acting
+// on: a large cached figure means the session history has grown, and /new is
+// the lever.
+//
+// ↑ folds cache writes in with fresh input: both are new content sent this turn
+// (writes just also get stored), and both bill near full price. ↓ is output.
+// "cached" is cache reads alone. Zero-valued classes are omitted so a fresh
+// session's first call doesn't render a noisy "0k cached".
+func fmtUsage(u agent.Usage) string {
+	if u.Total() == 0 {
+		return ""
+	}
+	var parts []string
+	if in := u.InputTokens + u.CacheCreationInputTokens; in > 0 {
+		parts = append(parts, fmtTokens(in)+"↑")
+	}
+	if u.OutputTokens > 0 {
+		parts = append(parts, fmtTokens(u.OutputTokens)+"↓")
+	}
+	if u.CacheReadInputTokens > 0 {
+		parts = append(parts, fmtTokens(u.CacheReadInputTokens)+" cached")
+	}
+	return strings.Join(parts, " ")
 }
 
 func fmtTokens(n int) string {

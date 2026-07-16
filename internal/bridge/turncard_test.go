@@ -48,8 +48,10 @@ func TestTurnCardCostAndTokens(t *testing.T) {
 	if !strings.Contains(got, "~$0.13") {
 		t.Errorf("estimate missing/wrong: %q", got)
 	}
-	if !strings.Contains(got, "110.0k tok") {
-		t.Errorf("token total missing: %q", got)
+	// Sent (input + cache writes), received, and cache reads stay separate: the
+	// 100k of replayed context must not read as 110k of fresh work.
+	if !strings.Contains(got, "9.0k↑ 1.0k↓ 100.0k cached") {
+		t.Errorf("token split missing/wrong: %q", got)
 	}
 
 	// The final render prefers the CLI's authoritative cost, without the ~.
@@ -59,6 +61,43 @@ func TestTurnCardCostAndTokens(t *testing.T) {
 	}
 	if !strings.HasPrefix(final, "✅ done") {
 		t.Errorf("final header wrong: %q", final)
+	}
+}
+
+func TestFmtUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		u    agent.Usage
+		want string
+	}{
+		{name: "no usage yet renders nothing", u: agent.Usage{}, want: ""},
+		{
+			name: "cache writes count as sent, not cached",
+			u:    agent.Usage{InputTokens: 1000, CacheCreationInputTokens: 4000, OutputTokens: 500},
+			want: "5.0k↑ 500↓",
+		},
+		{
+			name: "a fresh first call omits the cached part",
+			u:    agent.Usage{InputTokens: 2000, OutputTokens: 300},
+			want: "2.0k↑ 300↓",
+		},
+		{
+			name: "a resumed turn is dominated by cache reads",
+			u:    agent.Usage{InputTokens: 200, OutputTokens: 2000, CacheReadInputTokens: 370_000},
+			want: "200↑ 2.0k↓ 370.0k cached",
+		},
+		{
+			name: "output-only usage still renders",
+			u:    agent.Usage{OutputTokens: 42},
+			want: "42↓",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fmtUsage(tc.u); got != tc.want {
+				t.Errorf("fmtUsage() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -137,7 +137,10 @@ whole group (`-pgid`) so `/stop` can't orphan tool children running as root.
 edits (editGap) and is finalized in place at turn end (`Finish`, never
 deleted — the activity card is the turn's record, §7); the card's cost
 estimate is display-only (price table in `turncard.go` — update it when
-prices change; the budget guard uses the CLI's `total_cost_usd`); sends retry
+prices change; the budget guard uses the CLI's `total_cost_usd`); the card
+splits tokens sent/received/cached rather than summing them (`fmtUsage`) —
+cache reads dominate a multi-step turn at 0.1× price, so one all-in figure
+misreads as a runaway; sends retry
 once before the plain-text fallback; replies
 >12 kB (`docThreshold`) go as document attachments. `tgbotapi` v5.5.1 is
 unmaintained and does not retry 429s — the retry/throttle layers compensate;

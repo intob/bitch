@@ -318,9 +318,14 @@ works regardless of where you (or the laptop) are.
   **activity card** (`bridge.turnCard`): a rolling feed of the last 8 tool
   calls, each appearing ⏳ when the `tool_use` block streams and resolving to
   ✅/❌ when its `tool_result` comes back (correlated by tool_use id), headed by
-  elapsed time, summed token usage from per-message `usage`, and a running cost
-  estimate (`~$…`, static price table; display-only — the budget guard §4.4
-  still uses the result event's `total_cost_usd`). A 5s ticker re-renders so
+  elapsed time, a token split from per-message `usage` (`12k↑ 3k↓ 370k cached`
+  — sent, received, and replayed-from-cache), and a running cost estimate
+  (`~$…`, static price table; display-only — the budget guard §4.4
+  still uses the result event's `total_cost_usd`). The split is deliberate: each
+  API call in a turn re-sends the whole context, so a multi-step turn's all-in
+  total is mostly cache reads at 0.1× price and a single summed figure reads as
+  a runaway. It also makes a bloated session history visible (`/new` is the
+  lever). A 5s ticker re-renders so
   the clock moves during long tool runs; `tg.Status` throttles actual edits.
   When the turn ends the card is **finalized in place, not deleted** — outcome
   header (✅ done / 🛑 stopped / ⚠️ failed) plus final time/tokens/cost — so the
