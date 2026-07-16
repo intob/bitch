@@ -1,12 +1,45 @@
 # bitch — Deployment Plan (Hetzner provisioning)
 
-**Status:** Ready to execute — waiting on secrets from the user (see §2).
-**Mode:** Full auto — Claude provisions everything via the Hetzner Cloud API,
-then SSHes in to harden + deploy. Decided with the user 2026-07-16.
+**Status: DEPLOYED & VERIFIED — 2026-07-16.** The bot (@<bot>) is live
+on the box and passed end-to-end verification (answers, `/status`, and the T1
+approval gate resolving instantly both ways). See the deployment record in §0.
+**Mode:** Full auto — Claude provisioned everything via the Hetzner Cloud API,
+then SSHed in to harden + deploy. Decided with the user 2026-07-16.
 
-This doc is self-contained so a fresh session can pick up mid-flow. It plans
+This doc is self-contained so a fresh session can pick up mid-flow. It planned
 build **phase 1** (§13 of [`DESIGN.md`](./DESIGN.md)) plus the deploy of the v1
-bridge already implemented in this repo.
+bridge implemented in this repo.
+
+---
+
+## 0. Deployment record (2026-07-16) — what actually happened
+
+| | |
+|---|---|
+| **Box** | `bitch` · **cx33** (Intel x86, 4 vCPU / 8 GB / 80 GB) · **nbg1** (Nuremberg) · Ubuntu 24.04 |
+| **IP** | `<box-ip>` (IPv6 `<box-ipv6>`) |
+| **SSH** | `ssh -i ~/.ssh/bitch_hetzner admin@<box-ip>` (root login disabled; admin has passwordless sudo) |
+| **Auth** | **Max-plan subscription** via `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`); budget guard **off** (`BITCH_DAILY_BUDGET_USD=0`) |
+| **Bot** | @<bot> (id <bot-id>); allowlist = user <user-id> |
+| **Deployed commit** | `a24d87f` on `main` |
+
+**Deviations from the original plan (all deliberate):**
+- **x86 `cx33`, not ARM `cax21`.** The entire ARM CAX line was sold out across
+  all three EU regions at deploy time. `cx33` is the exact-spec x86 equivalent;
+  the workload is arch-agnostic (`setup.sh` now auto-detects arch).
+- **Region `nbg1`, not `fsn1`** — same reason (capacity), still EU.
+- **Max-plan auth, not an Anthropic API key** — user's choice. Consequence: the
+  $/day budget guard is inert (no per-token cost reported), so the real ceiling
+  is the Max usage limit. `BITCH_DAILY_BUDGET_USD=0`.
+- **Firewall egress adds TCP 80** (beyond the planned 443/53/22) — Ubuntu `apt`
+  and unattended security upgrades fetch over HTTP.
+
+**Bugs found during the live rollout and fixed** (commit `a24d87f`; all were
+invisible to unit tests because they only manifest with a real spawned `claude`
+child): relative `--settings` path, prompt swallowed by variadic `--add-dir`
+(now sent on stdin), and stale-session recovery. Details in the commit message.
+
+**Still outstanding for the user — see the checklist in §4.**
 
 ---
 
@@ -91,14 +124,20 @@ Tooling: `curl` against the Hetzner REST API (`https://api.hetzner.cloud/v1`), o
 
 ## 4. Post-setup checklist
 
-- [ ] Bot answers the user; unlisted users are dropped (test from another account if handy).
-- [ ] `/status` shows dir `/srv/work`, tier T1, model + effort, budget $20.
-- [ ] A risky op (e.g. `git push`) triggers a Telegram ✅/❌ approval at T1.
-- [ ] `systemctl status bitch` = active; survives `reboot`.
-- [ ] **Hetzner Cloud Firewall** attached (verify in console) — inbound SSH only, egress limited.
-- [ ] **Rotate/delete the Hetzner API token** used for provisioning.
-- [ ] Private key `~/.ssh/bitch_hetzner` backed up; note the box IP.
-- [ ] Decide on Git credentials scope if repos were cloned (never the full-access personal token).
+Done during the 2026-07-16 rollout:
+- [x] Bot answers the user (verified: read `/srv/work`, correct answer).
+- [x] `/status` works (dir `/srv/work`, tier T1, model/effort defaults, budget off).
+- [x] A risky op triggers a Telegram ✅/❌ approval at T1 — **both ✅ and ❌ resolve instantly** (the concurrency-fix path).
+- [x] `systemctl is-active bitch` = active.
+- [x] **Hetzner Cloud Firewall** attached — inbound SSH from the user's IP only; egress 443/53/22/80.
+
+**Still for the user to do:**
+- [ ] **Rotate/delete the Hetzner API token** used for provisioning (it was pasted into the chat transcript — most powerful credential; do this first).
+- [ ] Consider rotating the **Telegram bot token** (@BotFather) and **revoking the `claude setup-token` OAuth token** (Anthropic account settings) — both were in the transcript. The agent keeps working; you'd just re-issue and update `/etc/bitch/bitch.env`.
+- [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP `<box-ip>`.
+- [ ] Confirm it **survives a reboot** (`sudo reboot`, then message the bot after ~30s).
+- [ ] Set a **Max usage cap** if you want a spend ceiling (the $/day guard is off under subscription auth).
+- [ ] Optional: clone repos under `/srv/work` with a scoped Git PAT / machine user (never a full-access token) so the agent has real projects to work on.
 
 ---
 
