@@ -18,7 +18,8 @@ go vet ./...             # clean
 Redeploy is binary-copy, not `git pull`: the box's `/root/bitch` is a plain
 source tree, so `redeploy.sh` cross-compiles here and ships `/opt/bitch/bitch`.
 Re-run `deploy/setup.sh` instead when the systemd unit, env schema, or CLI pin
-changes. Deployment specifics (host, key, deployed commit) live in `DEPLOY.md`.
+changes. Deployment specifics (host, key) live in `DEPLOY.md`. Don't log individual
+deploys anywhere — no "deployed commit" pins, no redeploy history entries.
 
 There is no linter config beyond `go vet`. The module path is
 `github.com/intob/bitch`. The user's global `~/go.work` includes this repo;
