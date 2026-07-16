@@ -110,6 +110,7 @@ func TestScan(t *testing.T) {
 func TestChildEnv(t *testing.T) {
 	t.Setenv("BITCH_TELEGRAM_TOKEN", "super-secret")
 	t.Setenv("BITCH_ALLOWED_USERS", "42")
+	t.Setenv("BITCH_TRANSCRIBE_KEY", "sk-whisper-secret")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 	t.Setenv("CLAUDE_CODE_SOMETHING", "yes")
 
@@ -136,7 +137,8 @@ func TestChildEnv(t *testing.T) {
 		}
 	}
 	for _, e := range env {
-		if strings.HasPrefix(e, "BITCH_TELEGRAM_TOKEN=") || strings.HasPrefix(e, "BITCH_ALLOWED_USERS=") {
+		if strings.HasPrefix(e, "BITCH_TELEGRAM_TOKEN=") || strings.HasPrefix(e, "BITCH_ALLOWED_USERS=") ||
+			strings.HasPrefix(e, "BITCH_TRANSCRIBE_KEY=") {
 			t.Errorf("bridge secret leaked into child env: %s", e)
 		}
 		if strings.HasPrefix(e, "LD_PRELOAD=") || strings.HasPrefix(e, "BASH_ENV=") || e == "PATH=/pwn" {

@@ -59,6 +59,65 @@ func TestLoadFailsClosed(t *testing.T) {
 	}
 }
 
+// Voice transcription is off unless an endpoint is configured (PLAN-6 §3), and
+// the key is optional — a self-hosted endpoint may want no auth at all.
+func TestLoadTranscribe(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		setValid(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.TranscribeURL != "" {
+			t.Errorf("TranscribeURL = %q, want empty (feature off)", c.TranscribeURL)
+		}
+		if c.TranscribeModel != "whisper-1" {
+			t.Errorf("TranscribeModel = %q, want the whisper-1 default", c.TranscribeModel)
+		}
+	})
+
+	t.Run("keyless is legal", func(t *testing.T) {
+		setValid(t)
+		t.Setenv("BITCH_TRANSCRIBE_URL", "http://127.0.0.1:8080/v1/audio/transcriptions")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load rejected a keyless endpoint: %v", err)
+		}
+		if c.TranscribeKey != "" {
+			t.Errorf("TranscribeKey = %q, want empty", c.TranscribeKey)
+		}
+	})
+
+	// Voice audio leaves the box, so the endpoint is https — unless it's on the
+	// box, where there's no wire to sniff.
+	cases := []struct {
+		name string
+		url  string
+		ok   bool
+	}{
+		{"https", "https://api.openai.com/v1/audio/transcriptions", true},
+		{"http on localhost", "http://localhost:8080/v1/audio/transcriptions", true},
+		{"http on loopback ip", "http://127.0.0.1:8080/v1/audio/transcriptions", true},
+		{"http on the internet", "http://api.openai.com/v1/audio/transcriptions", false},
+		{"no scheme", "api.openai.com/v1/audio/transcriptions", false},
+		{"not a url", "://nope", false},
+		{"wrong scheme", "ftp://example.com/x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setValid(t)
+			t.Setenv("BITCH_TRANSCRIBE_URL", tc.url)
+			_, err := Load()
+			if tc.ok && err != nil {
+				t.Errorf("Load(%q) = %v, want accepted", tc.url, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("Load accepted %q, want a refusal", tc.url)
+			}
+		})
+	}
+}
+
 func TestWithinRoots(t *testing.T) {
 	root := setValid(t)
 	c, err := Load()

@@ -1,9 +1,16 @@
 # PLAN 6 — voice input (transcription)
 
-Status: **proposal, not yet implemented.** Build order: **6 of 6 — decided:
-wanted, but last** (user, 2026-07-16). Depends on PLAN-2-MEDIA-IN.md (the
+Status: **implemented** (2026-07-16). Build order was **6 of 6 — decided:
+wanted, but last** (user, 2026-07-16). Depended on PLAN-2-MEDIA-IN.md (the
 download plumbing and the no-silent-drop dispatch). Authority for intent is
-`DESIGN.md`; read alongside `CLAUDE.md` (invariants).
+`DESIGN.md` §4/§7; read alongside `CLAUDE.md` (invariants). This doc is kept as
+the rationale record — the code, not this file, is now the reference.
+
+Built as designed, with two things the plan didn't say: the transcript echo is
+truncated for display (`voiceEchoLimit`, since `reply` doesn't chunk and a long
+ramble would blow Telegram's message limit — the agent still gets all of it),
+and `config` refuses a plain-http endpoint unless it's loopback rather than
+accepting any URL.
 
 ## 1. The ask
 

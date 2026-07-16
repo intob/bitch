@@ -6,6 +6,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,6 +38,15 @@ type Config struct {
 
 	// Budget guard (§4.4)
 	DailyBudgetUSD float64 // BITCH_DAILY_BUDGET_USD — per-day spend ceiling; 0 disables.
+
+	// Voice transcription (§7, PLAN-6-VOICE.md). An OpenAI-compatible
+	// POST /v1/audio/transcriptions endpoint the user picks — Whisper, Groq, or a
+	// self-hosted gateway. This is the one inbound type that needs an external
+	// service, so it is off unless URL is set, and the key is bridge-only: like
+	// the Telegram token it must never reach childEnv (§4.6).
+	TranscribeURL   string // BITCH_TRANSCRIBE_URL — full endpoint URL; unset ⇒ voice stays declined.
+	TranscribeKey   string // BITCH_TRANSCRIBE_KEY — bearer token; empty is legal (keyless self-hosted).
+	TranscribeModel string // BITCH_TRANSCRIBE_MODEL — default "whisper-1".
 
 	// Internals
 	HookAddr   string // BITCH_HOOK_ADDR — loopback addr for the approval callback server (§4.3).
@@ -76,6 +87,9 @@ func Load() (*Config, error) {
 		DBPath:          envOr("BITCH_DB_PATH", "data/bitch.sqlite"),
 		StateDir:        envOr("BITCH_STATE_DIR", "data/state"),
 		SecretsPath:     DefaultSecretsPath, // fixed by design; see the field comment
+		TranscribeURL:   strings.TrimSpace(os.Getenv("BITCH_TRANSCRIBE_URL")),
+		TranscribeKey:   os.Getenv("BITCH_TRANSCRIBE_KEY"),
+		TranscribeModel: envOr("BITCH_TRANSCRIBE_MODEL", "whisper-1"),
 		DailyBudgetUSD:  envFloat("BITCH_DAILY_BUDGET_USD", 20),
 		DefaultTier:     int(envInt("BITCH_DEFAULT_TIER", 1)),
 		ApprovalTimeout: time.Duration(envInt("BITCH_APPROVAL_TIMEOUT", 300)) * time.Second,
@@ -169,7 +183,37 @@ func (c *Config) validate() error {
 	if c.DefaultTier < 0 || c.DefaultTier > 3 {
 		return fmt.Errorf("BITCH_DEFAULT_TIER must be 0..3, got %d", c.DefaultTier)
 	}
+	return c.validateTranscribe()
+}
+
+// validateTranscribe checks the transcription endpoint (PLAN-6 §4). Voice audio
+// leaves the box, so the transport is not optional: plain http is refused unless
+// the endpoint is on this machine, where there is no wire to sniff.
+func (c *Config) validateTranscribe() error {
+	if c.TranscribeURL == "" {
+		return nil // feature off; the voice arm keeps declining
+	}
+	u, err := url.Parse(c.TranscribeURL)
+	if err != nil {
+		return fmt.Errorf("BITCH_TRANSCRIBE_URL: %w", err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("BITCH_TRANSCRIBE_URL %q needs a scheme and host (e.g. https://api.openai.com/v1/audio/transcriptions)", c.TranscribeURL)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("BITCH_TRANSCRIBE_URL must be https (http is allowed only for a loopback endpoint), got %q", u.Scheme)
+	}
 	return nil
+}
+
+// isLoopbackHost reports whether host names this machine. Voice audio to a
+// process on the box never crosses a network, so it doesn't need TLS.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // NormalizeEffort returns effort if it is a valid `claude --effort` level, else

@@ -54,7 +54,7 @@ func newMedia(bot *tgbotapi.BotAPI, dir string) *media {
 // attachment is what the bridge picked out of a message.
 type attachment struct {
 	fileID string
-	kind   string // "img" or "doc" — the filename prefix, and picks the no-caption prompt
+	kind   string // "img", "doc", or "voice" — the filename prefix, and picks the no-caption prompt
 	mime   string // Telegram's MimeType; empty for photos
 	name   string // sender-supplied filename; context only, never part of a path
 	size   int    // Telegram's reported size; advisory, the copy is capped regardless
@@ -74,12 +74,42 @@ func pickAttachment(msg *tgbotapi.Message) (attachment, bool) {
 	return attachment{}, false
 }
 
+// pickVoice returns the audio in msg, or false (§7, PLAN-6 §3). All three arms
+// become one kind: what the endpoint gets is a file with an extension, and it —
+// not the bridge — decides what it can decode. A video note is audio to us.
+func pickVoice(msg *tgbotapi.Message) (attachment, bool) {
+	switch {
+	case msg.Voice != nil:
+		v := msg.Voice
+		return attachment{fileID: v.FileID, kind: "voice", mime: v.MimeType, size: v.FileSize}, true
+	case msg.VideoNote != nil:
+		// VideoNote carries no MimeType; Telegram records them as mp4.
+		n := msg.VideoNote
+		return attachment{fileID: n.FileID, kind: "voice", mime: "video/mp4", size: n.FileSize}, true
+	case msg.Audio != nil:
+		a := msg.Audio
+		return attachment{fileID: a.FileID, kind: "voice", mime: a.MimeType, name: a.FileName, size: a.FileSize}, true
+	}
+	return attachment{}, false
+}
+
 // fetch downloads the attachment and returns the prompt for the turn it becomes.
 func (m *media) fetch(chatID int64, msg *tgbotapi.Message) (string, error) {
 	att, ok := pickAttachment(msg)
 	if !ok {
 		return "", fmt.Errorf("no downloadable file in that message")
 	}
+	path, err := m.fetchAttachment(chatID, att)
+	if err != nil {
+		return "", err
+	}
+	return mediaPrompt(msg.Caption, att, path), nil
+}
+
+// fetchAttachment downloads att into the chat's media dir and returns the path.
+// Voice takes this path directly: its file is transcription input, not something
+// the agent reads, so it never becomes a media prompt.
+func (m *media) fetchAttachment(chatID int64, att attachment) (string, error) {
 	if att.size > maxMediaBytes {
 		return "", fmt.Errorf("that file is %s — Telegram caps bot downloads at 20 MB", humanBytes(att.size))
 	}
@@ -99,7 +129,7 @@ func (m *media) fetch(chatID int64, msg *tgbotapi.Message) (string, error) {
 	if err := m.download(url, path); err != nil {
 		return "", err
 	}
-	return mediaPrompt(msg.Caption, att, path), nil
+	return path, nil
 }
 
 // download streams url to path, refusing anything over the cap. The copy is
@@ -138,8 +168,20 @@ func (m *media) download(url, path string) error {
 
 // mediaExt maps what Telegram tells us to a file extension. Claude Code's Read
 // tool dispatches on extension, so getting this right is what makes an image
-// render rather than land as bytes.
+// render rather than land as bytes — and the audio entries do the same job for
+// the transcription endpoint, which sniffs the upload's filename to pick a
+// decoder (PLAN-6 §3).
 var mediaExt = map[string]string{
+	"audio/ogg":        ".oga", // Telegram voice notes: opus in an ogg container
+	"audio/opus":       ".opus",
+	"audio/mpeg":       ".mp3",
+	"audio/mp4":        ".m4a",
+	"audio/x-m4a":      ".m4a",
+	"audio/wav":        ".wav",
+	"audio/x-wav":      ".wav",
+	"audio/flac":       ".flac",
+	"audio/webm":       ".webm",
+	"video/mp4":        ".mp4", // video notes
 	"image/jpeg":       ".jpg",
 	"image/png":        ".png",
 	"image/gif":        ".gif",
@@ -162,9 +204,12 @@ func mediaFilename(att attachment, now time.Time) string {
 		ext = safeExt(att.name)
 	}
 	if ext == "" {
-		if att.kind == "img" {
+		switch att.kind {
+		case "img":
 			ext = ".jpg" // Telegram re-encodes every photo to JPEG
-		} else {
+		case "voice":
+			ext = ".oga" // what Telegram records a voice note as
+		default:
 			ext = ".bin"
 		}
 	}

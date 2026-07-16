@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -32,7 +34,8 @@ type Bridge struct {
 	sender  *tg.Sender
 	uploads uploader // outbound files from the agent (§7); the sender, behind an interface for tests
 	runner  *agent.Runner
-	media   *media // inbound attachment downloads (§7)
+	media   *media       // inbound attachment downloads (§7)
+	voice   *transcriber // voice → text; nil when BITCH_TRANSCRIBE_URL is unset (§7)
 	botID   int64
 
 	mu      sync.Mutex
@@ -164,6 +167,7 @@ func New(cfg *config.Config, st *store.Store, exe string) (*Bridge, error) {
 		uploads: sender,
 		runner:  runner,
 		media:   newMedia(bot, cfg.MediaDir),
+		voice:   newTranscriber(cfg),
 		botID:   bot.Self.ID,
 		runs:    make(map[store.Key]*activeRun),
 		pending: make(map[string]*pendingApproval),
@@ -282,7 +286,14 @@ func (b *Bridge) handleNonText(ctx context.Context, msg *tgbotapi.Message, key s
 		// network fetch of up to 20 MB and the loop must keep draining updates.
 		go b.handleMediaTurn(ctx, msg, key)
 	case msg.Voice != nil || msg.VideoNote != nil || msg.Audio != nil:
-		b.reply(msg.Chat.ID, "🎤 voice isn't supported yet — text, images, or files.")
+		if b.voice == nil {
+			// Fail closed: no endpoint configured means no guess at what was said.
+			b.reply(msg.Chat.ID, "🎤 voice isn't enabled — set BITCH_TRANSCRIBE_URL, or send text, images, or files.")
+			return
+		}
+		// Off the poll loop like any turn: this one is a download plus an external
+		// call before the agent even starts.
+		go b.handleVoiceTurn(ctx, msg, key)
 	default:
 		b.reply(msg.Chat.ID, "I can only handle text, images, and files.")
 	}
@@ -303,6 +314,75 @@ func (b *Bridge) handleMediaTurn(ctx context.Context, msg *tgbotapi.Message, key
 		return
 	}
 	b.handleAgentTurn(ctx, msg, key, prompt)
+}
+
+// handleVoiceTurn transcribes a voice note and runs the turn it becomes (§7,
+// PLAN-6 §3). Fail closed at every step: a failed download or a failed
+// transcription ends here, because a turn started on a guess at what was said is
+// worse than no turn at all.
+func (b *Bridge) handleVoiceTurn(ctx context.Context, msg *tgbotapi.Message, key store.Key) {
+	chatID := msg.Chat.ID
+	// The download plus the external call is latency the user would otherwise read
+	// as silence.
+	b.reply(chatID, "🎤 transcribing…")
+	text, err := b.transcribeVoice(ctx, chatID, msg)
+	if err != nil {
+		log.Printf("voice (chat %d): %v", chatID, err)
+		b.reply(chatID, "⚠️ "+err.Error())
+		return
+	}
+	// Echo before the turn: a bad transcription is the failure mode here, and the
+	// user needs to see it in time to /stop rather than after the agent has acted
+	// on a misheard sentence.
+	b.reply(chatID, "🎤 → "+ellipsize(text, voiceEchoLimit))
+	b.handleAgentTurn(ctx, msg, key, voicePrompt(text))
+}
+
+// transcribeVoice downloads the audio, turns it into text, and deletes it. An
+// error here means no turn: the transcript is the whole prompt, so a partial or
+// failed one has nothing to fall back to.
+func (b *Bridge) transcribeVoice(ctx context.Context, chatID int64, msg *tgbotapi.Message) (string, error) {
+	att, ok := pickVoice(msg)
+	if !ok {
+		return "", fmt.Errorf("I couldn't find any audio in that message")
+	}
+	path, err := b.media.fetchAttachment(chatID, att)
+	if err != nil {
+		return "", fmt.Errorf("couldn't fetch that voice note: %w", err)
+	}
+	// The audio is transcription input and nothing else — no later turn reads it,
+	// and it's the one inbound file whose bytes left the box. Drop it as soon as
+	// it's text; the 7-day prune is only the backstop (PLAN-6 §3).
+	defer os.Remove(path)
+
+	text, err := b.voice.transcribe(ctx, path)
+	if err != nil {
+		return "", fmt.Errorf("transcription failed: %w", err)
+	}
+	return text, nil
+}
+
+// voiceEchoLimit bounds the echoed transcript. The echo is a glance-check, not a
+// transcript viewer, and reply doesn't chunk — a two-minute ramble would blow
+// Telegram's message limit. The agent still gets the whole thing.
+const voiceEchoLimit = 900
+
+// voicePrompt marks the prompt as spoken, so the agent reads transcription
+// artifacts (homophones, missing punctuation) as noise rather than intent.
+func voicePrompt(text string) string {
+	return "(transcribed voice message) " + text
+}
+
+func ellipsize(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	// Cut on a rune boundary: a halved rune renders as a replacement char.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // keyFor builds the group-ready session key. ThreadID is 0 for 1:1 chats; forum

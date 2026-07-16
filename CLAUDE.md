@@ -177,6 +177,22 @@ returns a URL with the bot token in it — bridge-side only, never logged, never
 in a prompt. Past the user-ID gate no message is silently dropped; unlisted
 users still are (§4.1).
 
+**Voice fails closed and the audio leaves the box** (§7, PLAN-6-VOICE.md).
+`BITCH_TRANSCRIBE_URL` unset ⇒ `b.voice` is nil and the voice arm declines; that
+nil check is the feature flag. Every failure in `transcribeVoice` — no audio,
+download, 401, timeout, a body that isn't `{"text":…}` — ends the path with no
+turn, because a turn started on a guess at what was said is worse than none.
+`BITCH_TRANSCRIBE_KEY` is bridge-only, like the Telegram token (there's a
+`TestChildEnv` assert); config refuses a non-https URL unless it's loopback,
+since the recording is on the wire. The audio is deleted right after
+transcription (`defer os.Remove`) — it's transcription input, not something a
+later turn reads. Keep the echo (`🎤 → `) *before* `handleAgentTurn`: mishearing
+is this path's failure mode and the echo is the user's chance to `/stop`. It's
+bounded (`voiceEchoLimit`) because `reply` doesn't chunk. The download reuses
+`media.fetchAttachment` — same cap, same bridge-generated name, and the
+extension is load-bearing twice over (Read dispatches on it; so does the
+endpoint's decoder).
+
 **One turn per chat** via the `b.runs` map; a prompt arriving while busy is
 **queued** (bounded 10 / 8 kB; overflow still gets "still working") and drained
 into the next turn by the loop in `handleAgentTurn`. The ownership rule: the

@@ -87,6 +87,12 @@ security boundary.
 
 The bot is a remote-execution surface, now on an internet-exposed cloud host.
 
+**Where your data goes.** Prompts go to Anthropic; that's the deal being struck.
+One optional feature widens it: with `BITCH_TRANSCRIBE_URL` set, voice notes are
+uploaded to the transcription endpoint the user chose (§7) — audio to a third
+party, off by default, and a self-hosted endpoint is a first-class answer.
+Nothing else on the box phones anywhere the agent wasn't told to.
+
 ### 4.1 Who can talk to it
 - **Hard allowlist by Telegram numeric user ID.** On every incoming update,
   compare `from.id` against a configured allowlist; silently drop everything
@@ -416,9 +422,26 @@ the tests, message me only if something broke."
   own `getFile` limit), enforced before the fetch *and* during the copy; a
   failed download starts no turn. Albums (`MediaGroupID`) arrive as separate
   updates and are each their own turn — later ones queue behind the first (§6).
-  Past the user-ID gate **no message is silently dropped**: voice gets a
-  not-yet note, anything else an honest refusal. Unlisted users stay silent
-  (§4.1).
+  Past the user-ID gate **no message is silently dropped**: anything that isn't
+  text, an attachment, or voice gets an honest refusal. Unlisted users stay
+  silent (§4.1).
+- **Inbound voice:** voice is how people talk to a phone while walking, so a
+  voice note, video note, or audio file becomes an ordinary turn:
+  `(transcribed voice message) <transcript>` is the prompt. Claude can't read
+  audio, so this is the one inbound type needing an outside service — an
+  OpenAI-compatible `POST /v1/audio/transcriptions` (`BITCH_TRANSCRIBE_URL`,
+  served by OpenAI, Groq, or a self-hosted gateway). **The audio leaves the box**
+  (§4, and the env example says so): the user picks who hears it, including a
+  local endpoint. Unset URL ⇒ voice is declined, and any failure — download,
+  401, timeout, a body that isn't a transcript — is an error message, never a
+  turn: acting on a guess at what was said is worse than not acting. The
+  transcript is echoed to the chat (`🎤 → …`) *before* the turn, because a
+  mishearing is the failure mode here and the user needs the chance to `/stop`.
+  The download reuses the media plumbing (same 20 MB cap, same bridge-generated
+  name — the extension is what the endpoint decodes by), and the audio is
+  deleted as soon as it's text; the 7-day prune is only a backstop. The key is
+  bridge-only: `childEnv` builds the agent's environment from scratch, so it
+  never reaches the agent (§4.6).
 - **Outbound files:** the agent delivers a binary artifact — a rendered chart, a
   screenshot, a built binary — with the **`send_file`** MCP tool (`path`,
   `caption`). It mirrors the capture tools (§4.7): the PreToolUse gate confirms

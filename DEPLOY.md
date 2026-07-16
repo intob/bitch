@@ -104,6 +104,13 @@ Hetzner token afterward** (most powerful); the rest live only on the box.
 4. **Anthropic API key** — `sk-ant-...` → `ANTHROPIC_API_KEY` for the `claude` CLI.
 5. *(Optional)* **Git PAT** (fine-grained) + which repos to clone under
    `/srv/work`. If skipped, no repos are cloned yet.
+6. *(Optional)* **Transcription endpoint + key** — `BITCH_TRANSCRIBE_URL` /
+   `BITCH_TRANSCRIBE_KEY`, which turn voice notes into turns (§7). Skipped ⇒
+   voice is declined and nothing else changes. Worth saying out loud when asking:
+   the recording leaves the box for whoever the user picks, so it is their call
+   which provider gets to hear them (a self-hosted endpoint on 127.0.0.1 counts).
+   No firewall change — it's an ordinary HTTPS destination on the already-open
+   443 egress.
 
 The user's **public IP** for the SSH firewall rule is auto-detected (Claude runs
 from the user's laptop, so SSH originates from that IP) — no need to provide it.
