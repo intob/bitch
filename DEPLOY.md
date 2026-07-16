@@ -21,7 +21,7 @@ bridge implemented in this repo.
 | **SSH** | `ssh -i ~/.ssh/bitch_hetzner admin@<box-ip>` (root login disabled; admin has passwordless sudo) |
 | **Auth** | **Max-plan subscription** via `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`); budget guard **off** (`BITCH_DAILY_BUDGET_USD=0`) |
 | **Bot** | @<bot> (id <bot-id>); allowlist = user <user-id> |
-| **Deployed commit** | `a24d87f` on `main` |
+| **Deployed commit** | `867b21d` on `main` (recall features live; redeploy via `deploy/redeploy.sh` — see §0.5) |
 
 **Deviations from the original plan (all deliberate):**
 - **x86 `cx33`, not ARM `cax21`.** The entire ARM CAX line was sold out across
@@ -38,6 +38,13 @@ bridge implemented in this repo.
 invisible to unit tests because they only manifest with a real spawned `claude`
 child): relative `--settings` path, prompt swallowed by variadic `--add-dir`
 (now sent on stdin), and stale-session recovery. Details in the commit message.
+
+**Redeploys since:**
+- **2026-07-16** — credential vault + facts recall + agent-driven MCP capture
+  (§4.7), shipped with the new `deploy/redeploy.sh`. Verified on the box: binary
+  online (`claude 2.1.210`), `mcp.json`/`settings.json` regenerated at boot, vault
+  auto-created at `/etc/bitch/secrets.db`, `bitch mcp` handshake OK. Live Telegram
+  check of the agent-capture approval card is still the user's to do (see §4).
 
 **Still outstanding for the user — see the checklist in §4.**
 
@@ -172,6 +179,7 @@ Done during the 2026-07-16 rollout:
 - [x] **Hetzner Cloud Firewall** attached — inbound SSH from the user's IP only; egress 443/53/22/80.
 
 **Still for the user to do:**
+- [ ] **Verify agent-driven capture live** (§4.7): at T1, paste a throwaway API key and ask the agent to save it → confirm the ✅/❌ approval card shows the value **redacted** → approve → `/new` → check the agent reuses it without re-asking. Also try `/remember email you@example.com`, then a fresh task that needs it. This is the one path unit tests can't cover (it needs a real MCP tool call through the hook).
 - [ ] **Rotate/delete the Hetzner API token** used for provisioning (it was pasted into the chat transcript — most powerful credential; do this first).
 - [ ] Consider rotating the **Telegram bot token** (@BotFather) and **revoking the `claude setup-token` OAuth token** (Anthropic account settings) — both were in the transcript. The agent keeps working; you'd just re-issue and update `/etc/bitch/bitch.env`.
 - [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP `<box-ip>`.

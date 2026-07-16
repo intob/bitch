@@ -53,21 +53,31 @@ scp -q -i "$SSH_KEY" "$TMP/bitch" "${SSH_USER}@${HOST}:/tmp/bitch.new"
 echo "==> installing + restarting (rolls back on failure)"
 "${SSH[@]}" 'sudo bash -s' <<'REMOTE'
 set -euo pipefail
+# Stop before swapping: you cannot overwrite a running executable (ETXTBSY), and
+# stopping first makes both the install and any rollback deterministic. The brief
+# downtime is fine — Telegram queues messages while the bot is offline.
+systemctl stop bitch
 [ -x /opt/bitch/bitch ] && cp -a /opt/bitch/bitch /opt/bitch/bitch.bak || true
 install -m 755 /tmp/bitch.new /opt/bitch/bitch
 rm -f /tmp/bitch.new
-systemctl restart bitch
-# Wait for the service to settle, then confirm it actually printed its online
-# banner (Restart=always would mask a crash-loop, so is-active alone isn't enough).
-for _ in $(seq 1 8); do
+# Mark the log cutoff so we match THIS boot's banner, not a stale one.
+STAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+systemctl start bitch
+ok=0
+for _ in $(seq 1 20); do
+	if systemctl is-active --quiet bitch &&
+		journalctl -u bitch --since "$STAMP" --no-pager | grep -q "online as @"; then
+		ok=1
+		break
+	fi
 	sleep 1
-	systemctl is-active --quiet bitch && break
 done
-if systemctl is-active --quiet bitch && journalctl -u bitch -n 40 --no-pager | grep -q "online as @"; then
-	journalctl -u bitch -n 40 --no-pager | grep "online as @" | tail -1
+if [ "$ok" = 1 ]; then
+	journalctl -u bitch --since "$STAMP" --no-pager | grep "online as @" | tail -1
 else
 	echo "!! service did not come online — rolling back to previous binary" >&2
-	[ -x /opt/bitch/bitch.bak ] && cp -a /opt/bitch/bitch.bak /opt/bitch/bitch && systemctl restart bitch
+	systemctl stop bitch || true
+	[ -x /opt/bitch/bitch.bak ] && cp -a /opt/bitch/bitch.bak /opt/bitch/bitch && systemctl start bitch
 	journalctl -u bitch -n 20 --no-pager >&2 || true
 	exit 1
 fi
