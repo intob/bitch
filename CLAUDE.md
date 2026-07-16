@@ -178,3 +178,12 @@ Session field, thread it through all three store queries (`Get`,
 - Two chats can race the daily budget check (single-user; accepted).
 - `stripTags` plain-text fallback is lossy for legitimate `<` in text
   (accepted; it's a last-resort path).
+- `captureNudge` (`internal/bridge/facts.go`) is prepended to **every** turn's
+  prompt so the agent knows the deferred `save_secret`/`remember_fact` MCP tools
+  exist (they're hidden behind `ToolSearch` by the server-side
+  `tengu_deferred_stub_tool` gate; see the constant's comment). It's ~110 words
+  on the hot path for all turns. Future: scope it so it's not paid every turn —
+  e.g. only prepend when the pinned CLI actually defers MCP tools (detect once at
+  boot, cache), only on fresh sessions (session-resume keeps earlier context), or
+  only until the session has used a capture tool once. Left unconditional for now
+  because capture correctness matters more than a small per-turn prompt cost.

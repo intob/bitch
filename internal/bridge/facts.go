@@ -105,6 +105,26 @@ func parseKeyValue(arg string) (key, value string) {
 	return strings.TrimSpace(key), strings.TrimSpace(value)
 }
 
+// captureNudge is a standing preamble line that tells the agent the capture
+// tools exist and to reach for them. Recent Claude Code hides MCP tools behind a
+// ToolSearch stub (the server-side tengu_deferred_stub_tool gate) rather than
+// loading them into the model's tool list, so the agent no longer sees
+// save_secret / remember_fact upfront and won't capture anything on its own. The
+// gate is server-controlled and can't be pinned in setup.sh, so we make capture
+// gate-independent from our side: name the tools in the prompt and note they may
+// need a ToolSearch first (§4.7). The PreToolUse gate still confirms each save
+// over Telegram before it runs, so the agent should just call the tool, not ask.
+//
+// This is prepended to every turn (~110 words on the hot path). Future: scope it
+// so it isn't paid every turn — see CLAUDE.md "Known limitations / deferred".
+const captureNudge = "You have two tools from the \"bitch\" MCP server for durable recall so future " +
+	"tasks don't re-ask: remember_fact (non-secret details — email, usernames, handles, " +
+	"preferences) and save_secret (credentials — API keys, tokens, passwords; the value is " +
+	"stored as an env var and never shown back). These may not appear in your tool list " +
+	"directly; if you don't see them, use ToolSearch to load them (search for the tool name). " +
+	"When the user gives you a durable personal detail or a credential, call the matching tool " +
+	"to capture it — don't ask first; you'll be prompted to confirm before it saves."
+
 // joinPreamble joins the non-empty preamble blocks with a blank line between,
 // so an empty facts or secrets section doesn't leave stray whitespace.
 func joinPreamble(blocks ...string) string {

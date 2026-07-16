@@ -238,7 +238,9 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 	// reuse things the user provided once instead of re-asking. Vault/fact read
 	// errors are non-fatal — worst case the agent asks; a turn is never aborted.
 	secretVals, secretsManifest := b.vaultForTurn()
-	manifest := joinPreamble(b.factsBlock(), secretsManifest)
+	// captureNudge is always present (gate-independent): the MCP capture tools may
+	// be deferred behind ToolSearch, so the agent needs to be told they exist (§4.7).
+	manifest := joinPreamble(captureNudge, b.factsBlock(), secretsManifest)
 
 	runReq := agent.RunRequest{
 		Prompt:          prompt,
