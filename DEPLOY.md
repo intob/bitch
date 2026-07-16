@@ -129,13 +129,13 @@ Done during the 2026-07-16 rollout:
 - [x] `/status` works (dir `/srv/work`, tier T1, model/effort defaults, budget off).
 - [x] A risky op triggers a Telegram ✅/❌ approval at T1 — **both ✅ and ❌ resolve instantly** (the concurrency-fix path).
 - [x] `systemctl is-active bitch` = active.
+- [x] **Survives reboot** — verified: box rebooted, service auto-started ~9s after boot with no intervention.
 - [x] **Hetzner Cloud Firewall** attached — inbound SSH from the user's IP only; egress 443/53/22/80.
 
 **Still for the user to do:**
 - [ ] **Rotate/delete the Hetzner API token** used for provisioning (it was pasted into the chat transcript — most powerful credential; do this first).
 - [ ] Consider rotating the **Telegram bot token** (@BotFather) and **revoking the `claude setup-token` OAuth token** (Anthropic account settings) — both were in the transcript. The agent keeps working; you'd just re-issue and update `/etc/bitch/bitch.env`.
 - [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP `<box-ip>`.
-- [ ] Confirm it **survives a reboot** (`sudo reboot`, then message the bot after ~30s).
 - [ ] Set a **Max usage cap** if you want a spend ceiling (the $/day guard is off under subscription auth).
 - [ ] Optional: clone repos under `/srv/work` with a scoped Git PAT / machine user (never a full-access token) so the agent has real projects to work on.
 
