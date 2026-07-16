@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,12 +65,13 @@ const helpText = `bitch — commands:
 /tier <0-3> — set permission tier (with confirm)
 /model <name> — set model (opus|sonnet|haiku|fable or a claude-… id; "default" to reset)
 /effort <level> — set effort (low|medium|high|xhigh|max; "default" to reset)
-/stop — cancel the current turn
+/stop — cancel the current turn and drop anything queued behind it
 /secrets — list stored credentials; /secrets set NAME value to store one, /secrets rm NAME to delete
 /remember [KEY value] — recall non-secret facts (email, usernames); no args lists them
 /forget KEY — drop a remembered fact
 /status — session, dir, tier, model, effort, today's spend
-Anything else is sent to the agent.`
+Anything else is sent to the agent. Send while a turn is running and it queues,
+then runs as the next turn in the same session.`
 
 func (b *Bridge) cmdNew(msg *tgbotapi.Message, key store.Key, arg string) {
 	sess, err := b.session(key)
@@ -123,13 +125,27 @@ func (b *Bridge) cmdCd(msg *tgbotapi.Message, key store.Key, arg string) {
 func (b *Bridge) cmdStop(msg *tgbotapi.Message, key store.Key) {
 	b.mu.Lock()
 	run, ok := b.runs[key]
+	var cancel context.CancelFunc
+	var dropped int
+	if ok {
+		// Clear the queue before cancelling: someone hitting stop wants the work
+		// stream stopped, not a surprise follow-up turn. The drain loop then sees
+		// an empty queue and exits. cancel is read under the lock because the
+		// drain loop swaps it per turn.
+		dropped = len(run.queue)
+		run.queue, run.queueBytes = nil, 0
+		cancel = run.cancel
+	}
 	b.mu.Unlock()
 	if !ok {
 		b.reply(msg.Chat.ID, "nothing running.")
 		return
 	}
-	run.cancel()
-	// The turn goroutine reports the stop; no reply here to avoid a race.
+	cancel()
+	// The turn goroutine reports the stop itself; no reply here to avoid a race.
+	if dropped > 0 {
+		b.reply(msg.Chat.ID, fmt.Sprintf("🗑 dropped %d queued message(s).", dropped))
+	}
 }
 
 func (b *Bridge) cmdTier(msg *tgbotapi.Message, key store.Key, arg string) {

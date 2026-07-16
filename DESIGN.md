@@ -294,6 +294,12 @@ works regardless of where you (or the laptop) are.
   `(chat_id, thread_id, bot_id) → session_id`, working dir, current tier, and
   per-session model/effort overrides — keyed group-ready from day one (§11) so
   the multi-agent move is additive.
+- **One turn at a time per chat**, but nothing typed is ever discarded: a
+  message arriving mid-turn is **queued** (bounded: 10 entries / 8 kB) and the
+  whole queue is drained, joined, and run as the next turn in the same session.
+  Overflow past the bound is refused. `/stop` cancels the running turn *and*
+  clears the queue — stopping means stopping the work stream, not queuing a
+  surprise follow-up.
 - **Control commands:** `/new [dir]`, `/stop`, `/tier <0-3>` (with confirm),
   `/model <name>`, `/effort <level>`, `/cd <path>` (within allowed roots),
   `/status` (session, dir, tier, model, effort, spend). `/model` and `/effort`
@@ -447,7 +453,7 @@ All primary decisions are resolved — the doc is ready to build against.
 
 1. **Provision & harden** — spin up the Hetzner CAX21 box, SSH key-only (admin
    user for SSH), Hetzner Cloud Firewall with egress limits, Go + toolchains.
-   (§4.5, §4.6, §5) — *planned in DEPLOY.md, pending secrets.*
+   (§4.5, §4.6, §5) — **done** (DEPLOY.md: deployed & verified 2026-07-16).
 2. **Skeleton** — Go bot + user-ID gate + echo. Prove the transport and that only
    you can drive it. — **done**
 3. **Agent wired in (T0 advisory)** — read-only Claude answering in-chat, with

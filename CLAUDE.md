@@ -144,8 +144,16 @@ unmaintained and does not retry 429s — the retry/throttle layers compensate;
 don't remove them. Forum topics aren't supported by this lib version, so
 `ThreadID` is always 0 (keying is already group-ready).
 
-**One turn per chat** via the `b.runs` map; a second prompt while busy gets
-"still working". Session continuity: `/new` and `/cd` clear
+**One turn per chat** via the `b.runs` map; a prompt arriving while busy is
+**queued** (bounded 10 / 8 kB; overflow still gets "still working") and drained
+into the next turn by the loop in `handleAgentTurn`. The ownership rule: the
+`b.runs[key]` entry is held continuously from first turn to final drain —
+`claimOrQueue` (gate + append) and `nextTurn` (pop-or-release) are each one
+critical section, so there is no window where the queue is non-empty but nobody
+owns the key and a rival goroutine could start. `/stop` clears the queue before
+cancelling. One turn is `runTurn`, which re-reads the session per iteration
+(a drained follow-up must resume the id the previous turn persisted).
+Session continuity: `/new` and `/cd` clear
 `ClaudeSessionID` (Claude Code sessions are project-scoped); the id persisted
 on init routes hook approvals back to the right chat — a fresh session's id is
 generated bridge-side and stored *before* the first tool call can fire.
@@ -176,8 +184,6 @@ Session field, thread it through all three store queries (`Get`,
 
 ## Known limitations / deferred
 
-- Phase 1 (Hetzner provisioning) is planned but not executed — DEPLOY.md is
-  the runbook and is blocked on user-provided secrets.
 - Multi-agent pipeline (DESIGN.md §11) is a future layer; don't preempt it,
   but don't break group-readiness (session keying, `/cmd@bot` stripping).
 - Two chats can race the daily budget check (single-user; accepted).

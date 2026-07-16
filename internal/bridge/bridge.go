@@ -38,8 +38,72 @@ type Bridge struct {
 	pending map[string]*pendingApproval // approval id → waiter
 }
 
+// activeRun is the turn slot for one chat: the cancel for the turn currently
+// running, plus prompts that arrived while it ran and will be drained into the
+// next turn (§6). Both fields are guarded by Bridge.mu.
 type activeRun struct {
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
+	queue      []string
+	queueBytes int
+}
+
+// Queue bounds. Unbounded growth would be a memory hole on a long turn, and
+// past this many pending thoughts the user is fighting the tool anyway —
+// overflow falls back to the old "still working" refusal.
+const (
+	maxQueuedPrompts = 10
+	maxQueuedBytes   = 8 << 10
+)
+
+// claimResult is what claimOrQueue did with a prompt.
+type claimResult int
+
+const (
+	turnClaimed  claimResult = iota // caller owns the chat's turn slot
+	turnQueued                      // appended to the running turn's queue
+	turnRejected                    // busy and the queue is at its bound
+)
+
+// claimOrQueue is the one-turn-per-chat gate (§6). If nothing owns key it
+// installs a run entry (cancel becomes the running turn's) and returns
+// turnClaimed; otherwise the prompt joins the owner's queue. Gate and append
+// share one critical section so a prompt can never slip between them.
+func (b *Bridge) claimOrQueue(key store.Key, prompt string, cancel context.CancelFunc) claimResult {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	run, busy := b.runs[key]
+	if !busy {
+		b.runs[key] = &activeRun{cancel: cancel}
+		return turnClaimed
+	}
+	if len(run.queue) >= maxQueuedPrompts || run.queueBytes+len(prompt) > maxQueuedBytes {
+		return turnRejected
+	}
+	run.queue = append(run.queue, prompt)
+	run.queueBytes += len(prompt)
+	return turnQueued
+}
+
+// nextTurn ends one iteration of the drain loop. It pops the whole queue and
+// installs a fresh cancel for the turn about to start, or — when the queue is
+// empty — releases the chat's turn slot and returns false.
+//
+// Pop-or-release is a single critical section on purpose: the b.runs entry must
+// be held continuously from the first turn to the final drain, or a prompt
+// landing in the gap would start a rival goroutine for the same chat.
+func (b *Bridge) nextTurn(ctx context.Context, key store.Key) (string, context.Context, context.CancelFunc, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	run, ok := b.runs[key]
+	if !ok || len(run.queue) == 0 {
+		delete(b.runs, key)
+		return "", nil, nil, false
+	}
+	prompt := strings.Join(run.queue, "\n\n")
+	run.queue, run.queueBytes = nil, 0
+	runCtx, cancel := context.WithCancel(ctx)
+	run.cancel = cancel
+	return prompt, runCtx, cancel, true
 }
 
 // New constructs a Bridge. It logs in to Telegram to learn the bot's own ID
@@ -182,44 +246,66 @@ func (b *Bridge) session(key store.Key) (*store.Session, error) {
 	return sess, nil
 }
 
-// handleAgentTurn runs one Claude Code turn for the chat, streaming progress to
-// a status message and the answer back as chunked replies (§7).
+// handleAgentTurn owns the chat's turn slot for as long as there is work: it
+// runs the prompt, then drains anything that arrived while it ran into a
+// follow-up turn, until the queue comes up empty (§6).
 func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key store.Key, prompt string) {
-	sess, err := b.session(key)
-	if err != nil {
-		b.reply(msg.Chat.ID, "⚠️ store error: "+err.Error())
-		return
-	}
-
-	// One turn at a time per chat (§6). A second prompt while busy is refused.
-	b.mu.Lock()
-	if _, busy := b.runs[key]; busy {
-		b.mu.Unlock()
-		b.reply(msg.Chat.ID, "⏳ still working — send /stop to cancel.")
-		return
-	}
+	chatID := msg.Chat.ID
 	runCtx, cancel := context.WithCancel(ctx)
-	b.runs[key] = &activeRun{cancel: cancel}
-	b.mu.Unlock()
-
-	defer func() {
+	switch b.claimOrQueue(key, prompt, cancel) {
+	case turnQueued:
 		cancel()
+		b.reply(chatID, "📥 queued — runs after the current turn (/stop cancels both).")
+		return
+	case turnRejected:
+		cancel()
+		b.reply(chatID, "⏳ still working — send /stop to cancel.")
+		return
+	}
+
+	// Backstop: nextTurn releases the slot on the normal path, but a panic in a
+	// turn must not leave the chat wedged as permanently busy.
+	defer func() {
 		b.mu.Lock()
-		delete(b.runs, key)
+		if run, ok := b.runs[key]; ok {
+			run.cancel()
+			delete(b.runs, key)
+		}
 		b.mu.Unlock()
 	}()
+
+	for {
+		b.runTurn(runCtx, key, chatID, prompt)
+		cancel()
+		var more bool
+		prompt, runCtx, cancel, more = b.nextTurn(ctx, key)
+		if !more {
+			return
+		}
+	}
+}
+
+// runTurn runs one Claude Code turn for the chat, streaming progress to a status
+// message and the answer back as chunked replies (§7). The session is re-read
+// per turn so a drained follow-up resumes the id the previous turn persisted.
+func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, prompt string) {
+	sess, err := b.session(key)
+	if err != nil {
+		b.reply(chatID, "⚠️ store error: "+err.Error())
+		return
+	}
 
 	// Budget guard (§4.4): refuse new work once the daily ceiling is hit.
 	if b.cfg.DailyBudgetUSD > 0 {
 		if spent, err := b.store.SpendToday(); err == nil && spent >= b.cfg.DailyBudgetUSD {
-			b.reply(msg.Chat.ID, fmt.Sprintf(
+			b.reply(chatID, fmt.Sprintf(
 				"🛑 daily budget reached ($%.2f / $%.2f). New work is paused until midnight UTC.",
 				spent, b.cfg.DailyBudgetUSD))
 			return
 		}
 	}
 
-	status, _ := b.sender.NewStatus(msg.Chat.ID, stateThinking)
+	status, _ := b.sender.NewStatus(chatID, stateThinking)
 
 	// The live activity card (§7): per-tool lines, elapsed time, tokens, and a
 	// running cost estimate. Model resolution mirrors agent.Run so the price
@@ -242,7 +328,7 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 				return
 			}
 			sentText = true
-			b.sendReply(msg.Chat.ID, text)
+			b.sendReply(chatID, text)
 		},
 		OnToolUse: func(id, name, summary string) {
 			card.StartTool(id, name, summary)
@@ -331,27 +417,27 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 
 	if err != nil {
 		if runCtx.Err() != nil {
-			b.reply(msg.Chat.ID, "🛑 stopped.")
+			b.reply(chatID, "🛑 stopped.")
 		} else {
-			log.Printf("agent turn error (chat %d): %v", msg.Chat.ID, err)
-			b.reply(msg.Chat.ID, "⚠️ agent error: "+err.Error())
+			log.Printf("agent turn error (chat %d): %v", chatID, err)
+			b.reply(chatID, "⚠️ agent error: "+err.Error())
 		}
 		return
 	}
 
 	// Ensure the final answer is delivered even if it never streamed as a block.
 	if !sentText && res != nil && strings.TrimSpace(res.Text) != "" {
-		b.sendReply(msg.Chat.ID, res.Text)
+		b.sendReply(chatID, res.Text)
 	}
 	if res != nil && res.IsError {
-		b.reply(msg.Chat.ID, "⚠️ the agent turn ended with an error ("+res.Subtype+").")
+		b.reply(chatID, "⚠️ the agent turn ended with an error ("+res.Subtype+").")
 	}
 
 	// Record spend and warn on crossing the budget (§4.4).
 	if res != nil && res.CostUSD > 0 {
 		if total, err := b.store.AddSpend(res.CostUSD); err == nil &&
 			b.cfg.DailyBudgetUSD > 0 && total >= b.cfg.DailyBudgetUSD {
-			b.reply(msg.Chat.ID, fmt.Sprintf(
+			b.reply(chatID, fmt.Sprintf(
 				"⚠️ daily budget reached: $%.2f / $%.2f.", total, b.cfg.DailyBudgetUSD))
 		}
 	}
