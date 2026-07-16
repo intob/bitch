@@ -9,10 +9,16 @@ records the 2026-07-16 review and what was fixed.
 ## Commands
 
 ```sh
-go build ./cmd/bitch     # build the single binary (serve + hook subcommands)
+go build ./cmd/bitch     # build the single binary (serve + hook + mcp subcommands)
 go test ./...            # unit tests — must stay green
 go vet ./...             # clean
+./deploy/redeploy.sh     # ship a code change to the live box (build+scp+restart+verify+rollback)
 ```
+
+Redeploy is binary-copy, not `git pull`: the box's `/root/bitch` is a plain
+source tree, so `redeploy.sh` cross-compiles here and ships `/opt/bitch/bitch`.
+Re-run `deploy/setup.sh` instead when the systemd unit, env schema, or CLI pin
+changes. Deployment specifics (host, key, deployed commit) live in `DEPLOY.md`.
 
 There is no linter config beyond `go vet`. The module path is
 `github.com/intob/bitch`. The user's global `~/go.work` includes this repo;

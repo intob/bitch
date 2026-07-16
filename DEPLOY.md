@@ -43,6 +43,32 @@ child): relative `--settings` path, prompt swallowed by variadic `--add-dir`
 
 ---
 
+## 0.5 Redeploying a code change (the everyday path)
+
+For an ordinary code change, **run `./deploy/redeploy.sh`** from the repo. It runs
+the tests, cross-compiles for the box's arch, ships the single binary over SSH,
+restarts the service, and verifies the online banner — auto-rolling back to the
+previous binary if it doesn't come up. One command, ~15 s.
+
+```sh
+./deploy/redeploy.sh
+# override target for a rebuilt/moved box:
+BITCH_HOST=1.2.3.4 BITCH_SSH_USER=admin BITCH_SSH_KEY=~/.ssh/bitch_hetzner ./deploy/redeploy.sh
+```
+
+Why binary-copy and not `git pull` on the box: `/root/bitch` is a plain source
+tree (scp'd at provisioning, **not** a git clone), and the child env is built
+from scratch, so building locally and copying the binary is the simplest correct
+path. Re-run **`deploy/setup.sh`** instead only when the systemd unit, the env
+schema (`bitch.env.example`), or system packages/CLI pin change — `redeploy.sh`
+deliberately touches nothing but `/opt/bitch/bitch`.
+
+After a redeploy, sanity-check from Telegram: `/status`, then a risky op to see the
+T1 approval card. The credential vault + facts recall (§4.7) need no deploy step —
+`/etc/bitch/secrets.db` is auto-created on first boot.
+
+---
+
 ## 1. Decisions already made
 
 | Thing | Choice | Why / ref |
