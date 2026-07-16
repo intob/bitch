@@ -122,6 +122,9 @@ Either way, "constrained now, open later" is a config change, not a rewrite.
 
 - "**ask over Telegram**" sends you the exact command/diff and blocks until you
   reply ✅ / ❌ (inline keyboard buttons). A pending request times out to **deny**.
+- **Sending a file out** (`send_file`, §7) sits between the columns: ask at
+  T0/T1, auto at T2+, jailed at every tier. The other MCP tools (capture, §4.7)
+  are "unknown tools" and take the risky column: deny at T0, ask at T1/T2.
 - **Working directory jail:** edits/reads confined to a configured root,
   compared on **physical paths** — symlinks are resolved on both the roots and
   the target, so a link inside the jail can't launder a target outside it.
@@ -416,6 +419,29 @@ the tests, message me only if something broke."
   Past the user-ID gate **no message is silently dropped**: voice gets a
   not-yet note, anything else an honest refusal. Unlisted users stay silent
   (§4.1).
+- **Outbound files:** the agent delivers a binary artifact — a rendered chart, a
+  screenshot, a built binary — with the **`send_file`** MCP tool (`path`,
+  `caption`). It mirrors the capture tools (§4.7): the PreToolUse gate confirms
+  it over Telegram before it runs, then `bitch mcp` POSTs the loopback
+  `/sendfile` endpoint, which routes session → chat exactly as the hook does and
+  uploads. Images (`.png/.jpg/.jpeg/.gif/.webp`) under 10 MB go out as an inline
+  photo — the preview is the point — everything else as a document, and a photo
+  Telegram refuses (it has dimension/ratio limits of its own) falls back to a
+  document rather than failing. **Tier:** ask at T0/T1, auto at T2+ — content-wise
+  it's the agent putting a workspace file in the chat, which printing one already
+  does, so it doesn't earn the T0 deny of the risky column; but a prompt-injected
+  agent auto-sending files is worth one tap while trust is low. The jail applies
+  at every tier.
+  The `/sendfile` handler **re-validates everything** the gate already checked —
+  resolve symlinks, `WithinRoots` on the physical path, an explicit `/etc/bitch`
+  deny, regular files only, non-empty, 50 MB cap (Telegram's bot-upload limit)
+  checked against the stat *and* as a capped read. That duplication is deliberate:
+  the endpoint must not assume the gate ran (same stance as `childEnv`
+  re-checking vault names, §4.7). Refusals come back through the MCP result so
+  the agent can adapt instead of guessing. The session id reaches `bitch mcp`
+  through a **per-run** `--mcp-config` (`agent.writeMCPConfig`) — unlike the hook,
+  an MCP server gets no session id of its own, and without one there is no chat
+  to send to (fail closed).
 
 ---
 

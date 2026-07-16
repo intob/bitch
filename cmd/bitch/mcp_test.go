@@ -26,7 +26,7 @@ func newTestMCP(t *testing.T, buf *bytes.Buffer) (*mcpServer, *storePayload) {
 	}))
 	t.Cleanup(srv.Close)
 	addr := strings.TrimPrefix(srv.URL, "http://")
-	return &mcpServer{addr: addr, secret: "hs", w: bufio.NewWriter(buf)}, &last
+	return &mcpServer{addr: addr, secret: "hs", sessionID: "sess-abc", w: bufio.NewWriter(buf)}, &last
 }
 
 // decodeReplies splits the server's newline-delimited JSON-RPC output.
@@ -64,9 +64,11 @@ func TestMCPInitializeAndList(t *testing.T) {
 	if res0["protocolVersion"] != "2025-06-18" {
 		t.Errorf("initialize protocolVersion = %v", res0["protocolVersion"])
 	}
-	// tools/list advertises both capture tools.
-	if !strings.Contains(buf.String(), "remember_fact") || !strings.Contains(buf.String(), "save_secret") {
-		t.Errorf("tools/list missing a tool: %s", buf.String())
+	// tools/list advertises every tool the agent is expected to reach for.
+	for _, tool := range []string{"remember_fact", "save_secret", "send_file"} {
+		if !strings.Contains(buf.String(), tool) {
+			t.Errorf("tools/list missing %s: %s", tool, buf.String())
+		}
 	}
 }
 
@@ -119,5 +121,74 @@ func TestMCPUnknownMethodErrors(t *testing.T) {
 	}
 	if _, hasErr := replies[0]["error"]; !hasErr {
 		t.Errorf("unknown method should return an error object: %+v", replies[0])
+	}
+}
+
+// TestMCPSendFileCall proves send_file posts the path, the caption, and the
+// session id the server was registered with — the id is what routes the file to
+// a chat, so a call without one must not reach the bridge at all.
+func TestMCPSendFileCall(t *testing.T) {
+	var buf bytes.Buffer
+	var last sendFilePayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sendfile" {
+			t.Errorf("posted to %s, want /sendfile", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&last)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	s := &mcpServer{
+		addr:      strings.TrimPrefix(srv.URL, "http://"),
+		secret:    "hs",
+		sessionID: "sess-abc",
+		w:         bufio.NewWriter(&buf),
+	}
+
+	s.handle([]byte(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"out.png","caption":"the chart"}}}`))
+	s.w.Flush()
+
+	if last.SessionID != "sess-abc" || last.Path != "out.png" || last.Caption != "the chart" {
+		t.Fatalf("sendfile payload = %+v", last)
+	}
+	res, _ := decodeReplies(t, &buf)[0]["result"].(map[string]any)
+	if res["isError"] != false {
+		t.Errorf("send_file reported error: %+v", res)
+	}
+
+	// No session id: fail closed, and don't post.
+	last = sendFilePayload{}
+	buf.Reset()
+	s.sessionID = ""
+	s.handle([]byte(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"out.png"}}}`))
+	s.w.Flush()
+	if last.Path != "" {
+		t.Errorf("posted despite having no session id: %+v", last)
+	}
+	res, _ = decodeReplies(t, &buf)[0]["result"].(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("send_file without a session should error: %+v", res)
+	}
+}
+
+// TestMCPBridgeRefusalReachesAgent: the bridge's validation message is what the
+// agent needs in order to adapt (compress, or pick an in-workspace path).
+func TestMCPBridgeRefusalReachesAgent(t *testing.T) {
+	var buf bytes.Buffer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"/etc/shadow is outside the allowed roots"}`))
+	}))
+	defer srv.Close()
+	s := &mcpServer{addr: strings.TrimPrefix(srv.URL, "http://"), secret: "hs", sessionID: "s1", w: bufio.NewWriter(&buf)}
+
+	s.handle([]byte(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"/etc/shadow"}}}`))
+	s.w.Flush()
+
+	res, _ := decodeReplies(t, &buf)[0]["result"].(map[string]any)
+	if res["isError"] != true {
+		t.Fatalf("refusal should be an error result: %+v", res)
+	}
+	if !strings.Contains(buf.String(), "outside the allowed roots") {
+		t.Errorf("bridge refusal did not reach the agent: %s", buf.String())
 	}
 }

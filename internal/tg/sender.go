@@ -68,13 +68,26 @@ func (s *Sender) sendPlain(chatID int64, text string) (int, error) {
 	return sent.MessageID, nil
 }
 
-// SendDocument uploads bytes as a file attachment (long diffs, logs, §7).
+// SendDocument uploads bytes as a file attachment (long diffs, logs, agent
+// artifacts, §7).
 func (s *Sender) SendDocument(chatID int64, filename string, data []byte, caption string) error {
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: filename, Bytes: data})
 	if caption != "" {
 		doc.Caption = caption
 	}
 	_, err := s.bot.Send(doc)
+	return err
+}
+
+// SendPhoto uploads bytes as an inline photo (§7). Telegram rejects some
+// technically-valid images (dimension and ratio limits of its own), so callers
+// fall back to SendDocument on error rather than treating this as final.
+func (s *Sender) SendPhoto(chatID int64, filename string, data []byte, caption string) error {
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{Name: filename, Bytes: data})
+	if caption != "" {
+		photo.Caption = caption
+	}
+	_, err := s.bot.Send(photo)
 	return err
 }
 

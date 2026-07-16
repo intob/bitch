@@ -30,6 +30,7 @@ type Bridge struct {
 	secrets *store.Store // the credential vault, a separate DB at cfg.SecretsPath (§4.7)
 	bot     *tgbotapi.BotAPI
 	sender  *tg.Sender
+	uploads uploader // outbound files from the agent (§7); the sender, behind an interface for tests
 	runner  *agent.Runner
 	media   *media // inbound attachment downloads (§7)
 	botID   int64
@@ -153,12 +154,14 @@ func New(cfg *config.Config, st *store.Store, exe string) (*Bridge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge: open secrets vault %s: %w", cfg.SecretsPath, err)
 	}
+	sender := tg.NewSender(bot)
 	return &Bridge{
 		cfg:     cfg,
 		store:   st,
 		secrets: secrets,
 		bot:     bot,
-		sender:  tg.NewSender(bot),
+		sender:  sender,
+		uploads: sender,
 		runner:  runner,
 		media:   newMedia(bot, cfg.MediaDir),
 		botID:   bot.Self.ID,

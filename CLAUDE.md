@@ -40,8 +40,8 @@ Telegram user → bridge poll loop (bridge.Run)
                                --mcp-config <generated mcp.json> --strict-mcp-config
       → every tool call fires PreToolUse hook → `bitch hook` subprocess
         → POST 127.0.0.1:8765/approve (shared secret)
-      → capture tools (save_secret/remember_fact) via `bitch mcp` subprocess
-        → POST 127.0.0.1:8765/store (shared secret) after the gate approves
+      → MCP tools (save_secret/remember_fact, send_file) via `bitch mcp` subprocess
+        → POST 127.0.0.1:8765/store or /sendfile (shared secret) after the gate approves
           → bridge.decide → policy.Evaluate → Allow / Deny / Ask
             → Ask: approval card in Telegram, blocks until ✅/❌ or timeout(deny)
     → stream events → live activity card edits (turnCard, §7) + chunked HTML replies
@@ -121,11 +121,13 @@ the PreToolUse stdin payload + `hookSpecificOutput.permissionDecision` output
 (`agent.writeMCPConfig`), and flags
 `--session-id/--resume/--effort/--settings/--mcp-config/--strict-mcp-config`.
 When bumping the pin: rerun `TestScan`, then a live turn with an approval, **and**
-confirm the agent-capture path still gates — the whole safety of agent-driven
-`save_secret`/`remember_fact` rests on the PreToolUse hook firing for MCP tools
-(so the save asks over Telegram before it runs). If a CLI bump stops firing hooks
-for MCP tools, agent-driven saves would become unconfirmed — treat that as a
-release blocker, not a nicety.
+confirm the agent-driven MCP path still gates — the whole safety of
+`save_secret`/`remember_fact`/`send_file` rests on the PreToolUse hook firing for
+MCP tools (so the call asks over Telegram before it runs). If a CLI bump stops
+firing hooks for MCP tools, agent-driven saves and sends would become
+unconfirmed — treat that as a release blocker, not a nicety. Check `send_file`
+specifically: at T1, ask for a file and confirm the ✅/❌ card appears **before**
+the file does.
 The bridge preflights `claude --version` at boot — keep that.
 
 **Process lifecycle:** claude runs in its own process group; cancel kills the
@@ -146,6 +148,20 @@ once before the plain-text fallback; replies
 unmaintained and does not retry 429s — the retry/throttle layers compensate;
 don't remove them. Forum topics aren't supported by this lib version, so
 `ThreadID` is always 0 (keying is already group-ready).
+
+**Outbound files re-validate; the gate is not trusted** (§7, PLAN-5-SEND-FILE.md).
+`send_file` is an MCP tool like the capture pair, but it names a chat, so the
+session id reaches `bitch mcp` through a **per-run** `--mcp-config`
+(`agent.writeMCPConfig`, written in `Run` and removed after) — an MCP server, unlike
+the hook, is told nothing about its session, and no session id means no send.
+`policy` gives it its own verdict (ask at T0/T1, auto at T2+, jailed at every
+tier) instead of the unknown-tool risky column. The `/sendfile` handler then
+re-checks every one of those rules — symlink-resolved `WithinRoots`, the static
+`/etc/bitch` deny, regular-file-only, the 50 MB cap against both the stat and a
+capped read — because it must not assume the gate ran (the `childEnv` stance).
+Refusals go back through the MCP result, not a log, so the agent can adapt. When
+touching this, keep the photo→document fallback: Telegram rejects some valid
+images, and a refused preview must still deliver the file.
 
 **Inbound media is bridge-named and jailed** (§7, PLAN-2-MEDIA-IN.md).
 Attachments land in `config.MediaDir` (`<StateDir>/media/<chatID>/`) — derived,
@@ -241,9 +257,9 @@ Session field, thread it through all three store queries (`Get`,
 - `stripTags` plain-text fallback is lossy for legitimate `<` in text
   (accepted; it's a last-resort path).
 - `captureNudge` (`internal/bridge/facts.go`) is prepended to **every** turn's
-  prompt so the agent knows the deferred `save_secret`/`remember_fact` MCP tools
-  exist (they're hidden behind `ToolSearch` by the server-side
-  `tengu_deferred_stub_tool` gate; see the constant's comment). It's ~110 words
+  prompt so the agent knows the deferred `save_secret`/`remember_fact`/`send_file`
+  MCP tools exist (they're hidden behind `ToolSearch` by the server-side
+  `tengu_deferred_stub_tool` gate; see the constant's comment). It's ~140 words
   on the hot path for all turns. Future: scope it so it's not paid every turn —
   e.g. only prepend when the pinned CLI actually defers MCP tools (detect once at
   boot, cache), only on fresh sessions (session-resume keeps earlier context), or

@@ -22,11 +22,14 @@ import (
 func runMCP() int {
 	addr := os.Getenv("BITCH_HOOK_ADDR")
 	secret := os.Getenv("BITCH_HOOK_SECRET")
+	// Injected per run by agent.writeMCPConfig: send_file has to name a chat, and
+	// the session id is what the bridge routes on.
+	sessionID := os.Getenv("BITCH_SESSION_ID")
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	out := bufio.NewWriter(os.Stdout)
-	srv := &mcpServer{addr: addr, secret: secret, w: out}
+	srv := &mcpServer{addr: addr, secret: secret, sessionID: sessionID, w: out}
 
 	for in.Scan() {
 		line := bytes.TrimSpace(in.Bytes())
@@ -41,6 +44,7 @@ func runMCP() int {
 
 type mcpServer struct {
 	addr, secret string
+	sessionID    string // the Claude session this server serves; routes send_file to a chat
 	w            *bufio.Writer
 }
 
@@ -126,6 +130,22 @@ func (s *mcpServer) toolsListResult() map[string]any {
 				"required": []any{"name", "value"},
 			},
 		},
+		map[string]any{
+			"name": "send_file",
+			"description": "Send a file from the workspace to the user in Telegram — a rendered image, " +
+				"a screenshot, a built binary, a generated PDF. Images arrive as an inline preview; " +
+				"everything else as an attachment. Use this whenever you produce a binary artifact the " +
+				"user should see; for text, just reply normally. Max 50 MB, and the path must be inside " +
+				"the workspace.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":    map[string]any{"type": "string", "description": "path to the file, absolute or relative to the working directory"},
+					"caption": map[string]any{"type": "string", "description": "optional one-line caption shown with the file"},
+				},
+				"required": []any{"path"},
+			},
+		},
 	}}
 }
 
@@ -137,6 +157,8 @@ func (s *mcpServer) toolsCallResult(params json.RawMessage) map[string]any {
 			Name        string `json:"name"`
 			Value       string `json:"value"`
 			Description string `json:"description"`
+			Path        string `json:"path"`
+			Caption     string `json:"caption"`
 		} `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
@@ -149,17 +171,33 @@ func (s *mcpServer) toolsCallResult(params json.RawMessage) map[string]any {
 		body = storePayload{Kind: "fact", Key: p.Arguments.Key, Value: p.Arguments.Value}
 	case "save_secret":
 		body = storePayload{Kind: "secret", Name: p.Arguments.Name, Value: p.Arguments.Value, Description: p.Arguments.Description}
+	case "send_file":
+		return s.sendFile(p.Arguments.Path, p.Arguments.Caption)
 	default:
 		return toolText("unknown tool: "+p.Name, true)
 	}
 
-	if err := s.postStore(body); err != nil {
+	if err := s.post("/store", body); err != nil {
 		return toolText("could not store: "+err.Error(), true)
 	}
 	if body.Kind == "secret" {
 		return toolText("Saved. It's available to future tasks as $"+body.Name+".", false)
 	}
 	return toolText("Remembered "+body.Key+". I'll recall it in future tasks.", false)
+}
+
+// sendFile delivers a workspace file to the chat (§7). The bridge is the one
+// that validates the path — the refusal it returns is surfaced verbatim so the
+// agent can adapt (compress, or pick a path inside the workspace).
+func (s *mcpServer) sendFile(path, caption string) map[string]any {
+	if s.sessionID == "" {
+		return toolText("cannot send: this MCP server has no session id", true)
+	}
+	body := sendFilePayload{SessionID: s.sessionID, Path: path, Caption: caption}
+	if err := s.post("/sendfile", body); err != nil {
+		return toolText("could not send: "+err.Error(), true)
+	}
+	return toolText("Sent "+path+" to the user in Telegram.", false)
 }
 
 // storePayload mirrors bridge.storeRequest.
@@ -171,18 +209,30 @@ type storePayload struct {
 	Description string `json:"description"`
 }
 
-func (s *mcpServer) postStore(body storePayload) error {
+// sendFilePayload mirrors bridge.sendFileRequest. The session id is what routes
+// the file to a chat; the bridge resolves it the same way it resolves the hook's.
+type sendFilePayload struct {
+	SessionID string `json:"session_id"`
+	Path      string `json:"path"`
+	Caption   string `json:"caption"`
+}
+
+// post sends body to a loopback bridge endpoint with the shared secret and
+// reports the bridge's own error string on refusal.
+func (s *mcpServer) post(endpoint string, body any) error {
 	if s.addr == "" || s.secret == "" {
 		return fmt.Errorf("bridge address/secret not set")
 	}
 	data, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, "http://"+s.addr+"/store", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, "http://"+s.addr+endpoint, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Bitch-Secret", s.secret)
-	client := &http.Client{Timeout: 15 * time.Second}
+	// Generous: /sendfile does the Telegram upload inline, so a 50 MB artifact on
+	// a slow link is a legitimate minute-plus.
+	client := &http.Client{Timeout: 3 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("bridge unreachable")

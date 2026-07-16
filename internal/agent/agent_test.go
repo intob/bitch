@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -188,5 +189,47 @@ func TestRunAddDirs(t *testing.T) {
 	args = strings.Split(strings.TrimSpace(string(raw)), "\n")
 	if n := strings.Count(strings.Join(args, "\n"), "--add-dir"); n != 1 {
 		t.Errorf("want exactly one --add-dir without a media root, got %d; argv = %v", n, args)
+	}
+}
+
+// TestWriteMCPConfig pins the --mcp-config shape (a version-coupled surface,
+// §9.2) and the session id inside it: send_file routes on that id, and an MCP
+// server has no other way to learn which session it serves (§7).
+func TestWriteMCPConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := writeMCPConfig(path, "/opt/bitch/bitch", "127.0.0.1:8765", "hs", "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("mcp config is not valid JSON: %v", err)
+	}
+	srv, ok := cfg.MCPServers["bitch"]
+	if !ok {
+		t.Fatalf("no \"bitch\" server registered: %s", data)
+	}
+	if srv.Type != "stdio" || srv.Command != "/opt/bitch/bitch" || !slices.Equal(srv.Args, []string{"mcp"}) {
+		t.Errorf("server = %+v", srv)
+	}
+	want := map[string]string{
+		"BITCH_HOOK_ADDR":   "127.0.0.1:8765",
+		"BITCH_HOOK_SECRET": "hs",
+		"BITCH_SESSION_ID":  "sess-1",
+	}
+	for k, v := range want {
+		if srv.Env[k] != v {
+			t.Errorf("env[%s] = %q, want %q", k, srv.Env[k], v)
+		}
 	}
 }

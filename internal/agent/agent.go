@@ -24,10 +24,10 @@ import (
 
 // Runner spawns Claude Code processes. One Runner is shared across all chats.
 type Runner struct {
-	cfg           *config.Config
-	exe           string // path to this bitch binary (for the hook + mcp subcommands)
-	settingsPath  string // pre-written settings.json wiring the PreToolUse hook
-	mcpConfigPath string // pre-written --mcp-config registering the `bitch mcp` server (§4.7)
+	cfg          *config.Config
+	exe          string // path to this bitch binary (for the hook + mcp subcommands)
+	stateDir     string // absolute; holds settings.json and the per-run mcp configs
+	settingsPath string // pre-written settings.json wiring the PreToolUse hook
 }
 
 // New creates a Runner and writes the shared settings.json that installs the
@@ -48,13 +48,9 @@ func New(cfg *config.Config, exe string) (*Runner, error) {
 	if err := writeSettings(settingsPath, exe); err != nil {
 		return nil, err
 	}
-	// Register the credential/fact capture MCP server (§4.7). The hook secret is
-	// resolved by now (bridge.New generates it before constructing the Runner).
-	mcpConfigPath := filepath.Join(stateDir, "mcp.json")
-	if err := writeMCPConfig(mcpConfigPath, exe, cfg.HookAddr, cfg.HookSecret); err != nil {
-		return nil, err
-	}
-	return &Runner{cfg: cfg, exe: exe, settingsPath: settingsPath, mcpConfigPath: mcpConfigPath}, nil
+	// The MCP config that registers the capture/send tools (§4.7) is written per
+	// run, in Run: it carries the session id. See writeMCPConfig.
+	return &Runner{cfg: cfg, exe: exe, stateDir: stateDir, settingsPath: settingsPath}, nil
 }
 
 // RunRequest describes one agent turn.
@@ -134,6 +130,15 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 		effort = r.cfg.Effort
 	}
 
+	// Per-run MCP registration: it names the session the tools act for (§7). The
+	// id is a UUID, so it's a safe filename; the file only has to outlive the
+	// process that reads it.
+	mcpConfigPath := filepath.Join(r.stateDir, "mcp-"+sessionID+".json")
+	if err := writeMCPConfig(mcpConfigPath, r.exe, r.cfg.HookAddr, r.cfg.HookSecret, sessionID); err != nil {
+		return nil, err
+	}
+	defer os.Remove(mcpConfigPath)
+
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -143,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 		"--settings", r.settingsPath,
 		// Register only our capture MCP server (§4.7); strict mode ignores any
 		// ambient MCP config, including a .mcp.json inside a cloned repo.
-		"--mcp-config", r.mcpConfigPath,
+		"--mcp-config", mcpConfigPath,
 		"--strict-mcp-config",
 	}
 	if ef := config.NormalizeEffort(effort); ef != "" {

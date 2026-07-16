@@ -100,6 +100,27 @@ func Evaluate(r Request, within WithinRoots) Verdict {
 			return riskyVerdict(r.Tier, action, cmd)
 		}
 
+	case isSendFileTool(tool):
+		// Outbound files (§7). Content-wise this is the agent putting a workspace
+		// file into the chat, which it can already do by printing one — so it does
+		// not earn the full risky column. But a prompt-injected agent that
+		// auto-sends files is worth one tap at the low tiers: Ask at T0/T1, auto
+		// at T2+. The jail applies at every tier, as for edits; the bridge
+		// re-validates the path when the tool actually calls in (fail closed).
+		p, _ := filePathArg(r.Input)
+		abs := resolve(r.WorkDir, p)
+		if !within(abs) {
+			return Verdict{Deny, "path outside workspace jail",
+				"Send file outside jail: " + p, abs}
+		}
+		action := "Send file: " + oneLine(p)
+		switch r.Tier {
+		case 0, 1:
+			return Verdict{Ask, "sending a file needs approval below T2", action, compactInput(r.Input)}
+		default:
+			return Verdict{Allow, "send file auto at T2+", action, ""}
+		}
+
 	default:
 		// Unknown / MCP / Task tools: fail closed. Auto only at full autonomy.
 		// Redact the value of a secret-capture tool so the approval card (and the
@@ -409,6 +430,13 @@ func compactInputMasking(in map[string]any, mask ...string) string {
 // Matches the tail so it's robust to the mcp__<server>__ prefixing.
 func isSecretCaptureTool(tool string) bool {
 	return strings.HasSuffix(tool, "save_secret")
+}
+
+// isSendFileTool reports whether tool is the agent-driven outbound-file MCP tool
+// (§7). Tail match, like isSecretCaptureTool, so the mcp__<server>__ prefix is
+// irrelevant.
+func isSendFileTool(tool string) bool {
+	return strings.HasSuffix(tool, "send_file")
 }
 
 func oneLine(s string) string {

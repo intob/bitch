@@ -230,3 +230,48 @@ func TestSymlinkJail(t *testing.T) {
 }
 
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
+
+// TestSendFileVerdict pins the outbound-file tier table (§7): the jail applies
+// at every tier, and sending asks below T2 rather than falling into the risky
+// column (a file the agent could already have printed doesn't warrant a T0 deny,
+// but a prompt-injected auto-send warrants a tap).
+func TestSendFileVerdict(t *testing.T) {
+	within := func(p string) bool { return strings.HasPrefix(p, "/work") }
+	send := func(tier int, path string) Verdict {
+		return Evaluate(Request{
+			Tool:    "mcp__bitch__send_file",
+			Input:   map[string]any{"path": path, "caption": "chart"},
+			WorkDir: "/work",
+			Tier:    tier,
+		}, within)
+	}
+
+	for _, tier := range []int{0, 1} {
+		if v := send(tier, "/work/out.png"); v.Decision != Ask {
+			t.Errorf("send_file T%d: got %v, want Ask", tier, v.Decision)
+		}
+	}
+	for _, tier := range []int{2, 3} {
+		if v := send(tier, "/work/out.png"); v.Decision != Allow {
+			t.Errorf("send_file T%d: got %v, want Allow", tier, v.Decision)
+		}
+	}
+	// Out of jail is denied at every tier, including full autonomy.
+	for _, tier := range []int{0, 1, 2, 3} {
+		if v := send(tier, "/etc/bitch/secrets.db"); v.Decision != Deny {
+			t.Errorf("send_file outside jail at T%d: got %v, want Deny", tier, v.Decision)
+		}
+	}
+	// A relative path is resolved against the workdir, not treated as escaping.
+	if v := send(2, "out.png"); v.Decision != Allow {
+		t.Errorf("send_file relative path: got %v, want Allow", v.Decision)
+	}
+	// ...and a traversal out of the workdir still lands outside the jail.
+	if v := send(2, "../../etc/passwd"); v.Decision != Deny {
+		t.Errorf("send_file traversal: got %v, want Deny", v.Decision)
+	}
+	// The card names the file.
+	if v := send(1, "/work/out.png"); !strings.Contains(v.Action, "out.png") {
+		t.Errorf("approval action should name the file: %q", v.Action)
+	}
+}

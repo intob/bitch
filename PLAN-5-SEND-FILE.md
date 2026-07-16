@@ -1,10 +1,28 @@
 # PLAN 5 — outbound files: a send_file MCP tool
 
-Status: **proposal, not yet implemented.** Build order: **5 of 6** — last of
-the feature plans before voice, because it touches the policy gate and the
-version-coupled MCP surface, so it gets the most careful review plus a live
-gating test. Authority for intent is `DESIGN.md`; read alongside `CLAUDE.md`
-(invariants) and PLAN-CREDENTIALS.md (the capture-tool pattern this mirrors).
+Status: **implemented, 2026-07-16** — see DESIGN.md §7 (outbound files), which is
+now the authority; this doc is kept as the rationale record. Build order: **5 of
+6**. The live gating test (§4) is still owed: it needs a real bot, and it is the
+release gate for this feature.
+
+Shipped as planned, with two deltas:
+
+- **Session routing had to be built, not reused.** The plan assumed the capture
+  tools carry a Claude session id — they don't, and don't need to: facts and
+  secrets are global, so `/store` never had to name a chat. `send_file` does, and
+  an MCP server (unlike the hook, which gets `session_id` on stdin) is told
+  nothing about its session. So `--mcp-config` became **per-run**
+  (`agent.writeMCPConfig` now takes a sessionID, `Run` writes and removes the
+  file), passing `BITCH_SESSION_ID` explicitly rather than leaning on the CLI's
+  env inheritance — which would couple chat routing to an undocumented detail of
+  how the pinned CLI spawns MCP servers. No session id ⇒ the tool refuses before
+  it posts.
+- **The approval card shows path + caption, not path + size.** `policy` is pure
+  (its one impurity is symlink resolution) and a size means a stat; the bridge
+  checks size where it matters, at the send. Keeping the gate off the filesystem
+  was worth more than the number on the card.
+
+`SendDocument` already took a filename, so only `SendPhoto` was new.
 
 ## 1. The ask
 
