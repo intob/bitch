@@ -191,7 +191,14 @@ is this path's failure mode and the echo is the user's chance to `/stop`. It's
 bounded (`voiceEchoLimit`) because `reply` doesn't chunk. The download reuses
 `media.fetchAttachment` — same cap, same bridge-generated name, and the
 extension is load-bearing twice over (Read dispatches on it; so does the
-endpoint's decoder).
+endpoint's decoder). That second one is sharper than it looks: OpenAI's
+`gpt-4o-transcribe` dispatches on the **name** and rejects `.oga`/`.opus` by name
+while accepting the identical opus bytes as `.ogg` — so `mediaExt` maps both
+ogg-ish mimes to `.ogg`, and `TestVoiceExtensionsAreTranscribable` pins every
+extension the voice path can emit to a decodable set. A "correct" `.oga` here is
+a 400 on every voice note (it shipped that way once). Newer models take fewer
+formats than `whisper-1`, so re-verify the set when changing
+`BITCH_TRANSCRIBE_MODEL`.
 
 **One turn per chat** via the `b.runs` map; a prompt arriving while busy is
 **queued** (bounded 10 / 8 kB; overflow still gets "still working") and drained

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -70,12 +72,13 @@ func TestVoiceFilename(t *testing.T) {
 		att     attachment
 		wantExt string
 	}{
-		{"telegram voice note", attachment{kind: "voice", mime: "audio/ogg"}, ".oga"},
+		{"telegram voice note", attachment{kind: "voice", mime: "audio/ogg"}, ".ogg"},
+		{"opus", attachment{kind: "voice", mime: "audio/opus"}, ".ogg"},
 		{"video note", attachment{kind: "voice", mime: "video/mp4"}, ".mp4"},
 		{"audio file", attachment{kind: "voice", mime: "audio/mpeg", name: "memo.mp3"}, ".mp3"},
-		{"unknown mime falls back to voice's default", attachment{kind: "voice", mime: "audio/x-weird"}, ".oga"},
+		{"unknown mime falls back to voice's default", attachment{kind: "voice", mime: "audio/x-weird"}, ".ogg"},
 		// The sender's filename still never reaches the path.
-		{"traversal in the name", attachment{kind: "voice", name: "../../etc/passwd"}, ".oga"},
+		{"traversal in the name", attachment{kind: "voice", name: "../../etc/passwd"}, ".ogg"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,6 +88,56 @@ func TestVoiceFilename(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every name the voice path can produce has to be one the endpoint will decode.
+// The extension is the whole contract — OpenAI dispatches on it and rejects the
+// rest by name, so a mapping that looks harmless (.oga for an ogg container,
+// .opus for opus) fails every voice note at runtime with a 400. This is the
+// regression test for that outage: verified live against gpt-4o-transcribe on
+// 2026-07-16, where identical opus bytes passed as .ogg and failed as .oga.
+func TestVoiceExtensionsAreTranscribable(t *testing.T) {
+	// The accepted set, narrowest across the models we might be pointed at.
+	// gpt-4o-transcribe takes fewer formats than whisper-1. .flac is the one
+	// entry not in OpenAI's documented list but verified working live — it stays
+	// because flac bytes have nowhere else to go: renaming them to a documented
+	// extension would just fail the decode instead. If OpenAI ever drops it, flac
+	// audio files break and nothing else does.
+	accepted := map[string]bool{
+		".ogg": true, ".mp3": true, ".mp4": true, ".mpeg": true,
+		".mpga": true, ".m4a": true, ".wav": true, ".webm": true,
+		".flac": true,
+	}
+	rejected := []string{".oga", ".opus"}
+
+	// Anything mediaExt can hand a voice note must be decodable.
+	for mime, ext := range mediaExt {
+		if !strings.HasPrefix(mime, "audio/") && mime != "video/mp4" {
+			continue // image/document mappings are Read's problem, not the endpoint's
+		}
+		if !accepted[ext] {
+			t.Errorf("mediaExt[%q] = %q, which the transcription endpoint rejects; want one of %v", mime, ext, keysOf(accepted))
+		}
+	}
+	// And the fallback, which is what an unknown mime lands on.
+	fallback := mediaFilename(attachment{kind: "voice", mime: "audio/x-unknown"}, testNow)
+	if !accepted[filepath.Ext(fallback)] {
+		t.Errorf("voice fallback ext = %q, which the endpoint rejects", filepath.Ext(fallback))
+	}
+	for _, ext := range rejected {
+		if accepted[ext] {
+			t.Fatalf("test is wrong: %q is in both the accepted and rejected sets", ext)
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestVoicePrompt(t *testing.T) {

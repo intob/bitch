@@ -171,9 +171,15 @@ func (m *media) download(url, path string) error {
 // render rather than land as bytes — and the audio entries do the same job for
 // the transcription endpoint, which sniffs the upload's filename to pick a
 // decoder (PLAN-6 §3).
+// Two of these are counter-intuitive and load-bearing: a Telegram voice note is
+// opus in an ogg container, whose pedantically-correct audio-only extension is
+// .oga — but OpenAI's gpt-4o-transcribe rejects both ".oga" and ".opus" outright
+// ("Unsupported file format oga") while accepting the identical bytes as ".ogg".
+// whisper-1 takes all three, so this only bites on the newer models. .ogg is the
+// name every endpoint agrees on; don't "correct" these back.
 var mediaExt = map[string]string{
-	"audio/ogg":        ".oga", // Telegram voice notes: opus in an ogg container
-	"audio/opus":       ".opus",
+	"audio/ogg":        ".ogg", // Telegram voice notes: opus in an ogg container
+	"audio/opus":       ".ogg", // opus is ogg-contained in practice; ".opus" is rejected
 	"audio/mpeg":       ".mp3",
 	"audio/mp4":        ".m4a",
 	"audio/x-m4a":      ".m4a",
@@ -208,7 +214,7 @@ func mediaFilename(att attachment, now time.Time) string {
 		case "img":
 			ext = ".jpg" // Telegram re-encodes every photo to JPEG
 		case "voice":
-			ext = ".oga" // what Telegram records a voice note as
+			ext = ".ogg" // what Telegram records a voice note as; .ogg, not .oga (see mediaExt)
 		default:
 			ext = ".bin"
 		}
