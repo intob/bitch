@@ -31,10 +31,18 @@ type Runner struct {
 // New creates a Runner and writes the shared settings.json that installs the
 // permission hook (§4.3). exe must be the absolute path to the bitch binary.
 func New(cfg *config.Config, exe string) (*Runner, error) {
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+	// Resolve the state dir to an absolute path: the settings path is passed to
+	// the claude child via --settings, and that child runs with its cwd set to
+	// the session workspace (not the bridge's cwd), so a relative path would be
+	// resolved against the wrong directory and not found.
+	stateDir := cfg.StateDir
+	if abs, err := filepath.Abs(stateDir); err == nil {
+		stateDir = abs
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("agent: state dir: %w", err)
 	}
-	settingsPath := filepath.Join(cfg.StateDir, "settings.json")
+	settingsPath := filepath.Join(stateDir, "settings.json")
 	if err := writeSettings(settingsPath, exe); err != nil {
 		return nil, err
 	}
@@ -108,11 +116,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 	// jail per-call; --add-dir keeps Claude Code from ranging wider on its own.
 	args = append(args, "--add-dir", req.WorkDir)
 	args = append(args, r.cfg.ClaudeExtraArgs...)
-	args = append(args, req.Prompt)
 
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = req.WorkDir
 	cmd.Env = r.childEnv()
+	// Feed the prompt on stdin, not as a trailing positional arg: --add-dir is
+	// variadic and would swallow a positional prompt, and stdin is also immune
+	// to prompts that begin with '-'.
+	cmd.Stdin = strings.NewReader(req.Prompt)
 	// Put claude in its own process group and kill the whole group on cancel:
 	// tool children (test runs, builds) must die with it, or /stop leaves them
 	// running as root (§6). WaitDelay unblocks Wait if a straggler holds the

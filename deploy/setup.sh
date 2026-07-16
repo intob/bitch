@@ -49,6 +49,14 @@ if ! id "$ADMIN_USER" &>/dev/null; then
     adduser --disabled-password --gecos "" "$ADMIN_USER"
     usermod -aG sudo "$ADMIN_USER"
 fi
+# Passwordless sudo for the admin user. Root SSH login is disabled below, and
+# admin has no password (key-only login), so without this nobody could perform
+# root actions over SSH — the box would be unadministerable. Access is already
+# bounded by key-only SSH from your IP(s) via the Hetzner Cloud Firewall (§4.5).
+cat >/etc/sudoers.d/90-"${ADMIN_USER}" <<EOF
+${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL
+EOF
+chmod 440 /etc/sudoers.d/90-"${ADMIN_USER}"
 # Copy root's authorized_keys to the admin user if present, so you keep access.
 if [ -f /root/.ssh/authorized_keys ]; then
     install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/$ADMIN_USER/.ssh"

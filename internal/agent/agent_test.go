@@ -1,12 +1,31 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/intob/bitch/internal/config"
 )
+
+// TestNewSettingsPathAbsolute guards the deploy bug where a relative StateDir
+// produced a relative --settings path that the claude child (whose cwd is the
+// session workspace, not the bridge's) could not resolve.
+func TestNewSettingsPathAbsolute(t *testing.T) {
+	t.Chdir(t.TempDir())
+	r, err := New(&config.Config{StateDir: "data/state"}, "/opt/bitch/bitch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(r.settingsPath) {
+		t.Errorf("settingsPath = %q, want absolute", r.settingsPath)
+	}
+	if _, err := os.Stat(r.settingsPath); err != nil {
+		t.Errorf("settings.json not written: %v", err)
+	}
+}
 
 // TestScan feeds a canned stream-json transcript through the parser and checks
 // that events dispatch to the right callbacks and the terminal result event is

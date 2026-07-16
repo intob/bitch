@@ -225,13 +225,30 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		OnThinking: func() { status.Set("💭 thinking…") },
 	}
 
-	res, err := b.runner.Run(runCtx, agent.RunRequest{
+	runReq := agent.RunRequest{
 		Prompt:          prompt,
 		WorkDir:         sess.WorkDir,
 		ClaudeSessionID: sess.ClaudeSessionID,
 		Model:           sess.Model,
 		Effort:          sess.Effort,
-	}, cb)
+	}
+	res, err := b.runner.Run(runCtx, runReq, cb)
+
+	// If we tried to resume a session that no longer exists — a prior failed
+	// turn that never persisted, an expired session, or a rebuilt box — clear
+	// it and transparently start fresh once. The failing resume exits before
+	// emitting any output, so no partial reply reached the user.
+	if err != nil && runReq.ClaudeSessionID != "" && runCtx.Err() == nil &&
+		strings.Contains(err.Error(), "No conversation found") {
+		_ = b.store.SetClaudeSession(key, "")
+		runReq.ClaudeSessionID = ""
+		res, err = b.runner.Run(runCtx, runReq, cb)
+	}
+	// A failed fresh turn never created a resumable conversation; drop the id
+	// stored optimistically on init so the next turn doesn't resume a ghost.
+	if err != nil && runReq.ClaudeSessionID == "" {
+		_ = b.store.SetClaudeSession(key, "")
+	}
 
 	status.Delete()
 
@@ -239,6 +256,7 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		if runCtx.Err() != nil {
 			b.reply(msg.Chat.ID, "🛑 stopped.")
 		} else {
+			log.Printf("agent turn error (chat %d): %v", msg.Chat.ID, err)
 			b.reply(msg.Chat.ID, "⚠️ agent error: "+err.Error())
 		}
 		return
