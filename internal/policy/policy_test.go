@@ -71,6 +71,7 @@ func TestClassifyBash(t *testing.T) {
 		{"cat ~/.ssh/id_rsa", bashRisky},
 		{"cat /root/.ssh/authorized_keys", bashRisky}, // agent HOME is /root
 		{"cat /etc/bitch/bitch.env", bashRisky},       // the bridge's own secrets
+		{"cat /root/.git-credentials", bashRisky},     // the git PAT store (§4.5)
 		{"find / -delete", bashRisky},
 		{"find . -name x -exec rm {} \\;", bashRisky},
 		{"ls && rm -rf foo", bashRisky},

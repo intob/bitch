@@ -112,8 +112,14 @@ Tooling: `curl` against the Hetzner REST API (`https://api.hetzner.cloud/v1`), o
 7. **Configure secrets** — write `/etc/bitch/bitch.env` (chmod 600) from
    `deploy/bitch.env.example` with the real token, user ID, API key, budget,
    model. Never committed.
-8. *(Optional)* **Clone repos** into `/srv/work` using the Git PAT (machine-user
-   or fine-grained), per §4.5.
+8. *(Optional)* **Wire Git credentials + clone repos** into `/srv/work`, per §4.5.
+   Fine-grained PAT scoped to the target repos (never a full-access token), stored
+   on disk so the from-scratch child env doesn't need to carry it:
+   `git config --global credential.helper store` then write
+   `/root/.git-credentials` (mode 600) as
+   `https://x-access-token:<PAT>@github.com`. `contents:read` clones/pulls;
+   add `contents:write` only for pushes (still gated). The policy denylist blocks
+   the agent from reading `.git-credentials`.
 9. **Start + verify**
    - `systemctl enable --now bitch`; `journalctl -u bitch -f`.
    - Confirm the startup log line ("bitch online as @… ; N allowed user(s)…").
@@ -137,7 +143,7 @@ Done during the 2026-07-16 rollout:
 - [ ] Consider rotating the **Telegram bot token** (@BotFather) and **revoking the `claude setup-token` OAuth token** (Anthropic account settings) — both were in the transcript. The agent keeps working; you'd just re-issue and update `/etc/bitch/bitch.env`.
 - [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP `<box-ip>`.
 - [ ] Set a **Max usage cap** if you want a spend ceiling (the $/day guard is off under subscription auth).
-- [ ] Optional: clone repos under `/srv/work` with a scoped Git PAT / machine user (never a full-access token) so the agent has real projects to work on.
+- [ ] Optional: wire a scoped Git PAT (fine-grained, never a full-access token) via `git config --global credential.helper store` + `/root/.git-credentials` (mode 600, `https://x-access-token:<PAT>@github.com`), then clone repos under `/srv/work` so the agent has real projects. `contents:read` clones/pulls; `contents:write` for gated pushes. See §4.5 / setup.sh step 2.
 
 ---
 

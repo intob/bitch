@@ -128,9 +128,19 @@ cat <<EOF
 
 $(log "Done — remaining manual steps")
 1. Edit /etc/bitch/bitch.env (token, BITCH_ALLOWED_USERS, ANTHROPIC_API_KEY).
-2. Provision Git credentials for your repos: a machine user or a fine-grained
-   PAT scoped to the repos you clone — never your full-access token (§4.5).
-   Clone your repos under /srv/work.
+2. Provision Git credentials for your repos (§4.5). Use a fine-grained PAT
+   scoped to just the repos you clone — never your full-access token. The agent
+   runs as root with HOME=/root, so store the credential on disk (git reads it
+   regardless of the child env, which is built from scratch):
+     git config --global credential.helper store
+     printf 'https://x-access-token:%s@github.com\n' "\$PAT" \\
+       > /root/.git-credentials
+     chmod 600 /root/.git-credentials
+   (\$PAT = the fine-grained token; contents:read is enough to clone/pull,
+   contents:write only if you want the agent to push.) The policy gate blocks
+   the agent from cat-ing this file, but root can still reach it — keep the PAT
+   scoped so the blast radius stays bounded. Then clone your repos under
+   /srv/work. Pushes still go through the approval gate (git push is a risky op).
 3. In the Hetzner console (or hcloud CLI), attach a Cloud Firewall to this VM:
      - inbound: SSH (22) from your IP(s) only; no app ports.
      - egress:  restrict outbound to what the agent actually needs. This is the
