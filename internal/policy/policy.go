@@ -173,13 +173,13 @@ var denyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(systemctl|service|launchctl)\b`),        // service control
 	regexp.MustCompile(`\bchmod\s+(-[a-zA-Z]*\s+)*[0-7]*7{2,3}\b`), // world-writable
 	regexp.MustCompile(`\bchown\b`),
-	regexp.MustCompile(`(~|\$HOME|/root)/\.ssh`),                                       // ssh key access (agent HOME is /root)
+	regexp.MustCompile(`(~|\$HOME|/root)/\.ssh`),                                                         // ssh key access (agent HOME is /root)
 	regexp.MustCompile(`(~|\$HOME|/root)/\.aws|\.config/gh|\.netrc|\.git-credentials|id_rsa|id_ed25519`), // cred files (incl. the git PAT store, §4.5)
-	regexp.MustCompile(`/etc/bitch`),                                                   // the bridge's own secrets (§4.2)
-	regexp.MustCompile(`\bfind\b[^;|&]*\s-(delete|exec|execdir|ok|okdir)\b`),           // find as an exec/delete engine
-	regexp.MustCompile(`\bufw\b|\biptables\b|\bnft\b`),                                 // firewall tampering
-	regexp.MustCompile(`:\s*\(\s*\)\s*\{`),                                             // fork bomb :(){ :|:& };:
-	regexp.MustCompile(`>\s*/dev/(sd|nvme|disk)`),                                      // write to raw disk
+	regexp.MustCompile(`/etc/bitch`),                                                                     // the bridge's own secrets (§4.2)
+	regexp.MustCompile(`\bfind\b[^;|&]*\s-(delete|exec|execdir|ok|okdir)\b`),                             // find as an exec/delete engine
+	regexp.MustCompile(`\bufw\b|\biptables\b|\bnft\b`),                                                   // firewall tampering
+	regexp.MustCompile(`:\s*\(\s*\)\s*\{`),                                                               // fork bomb :(){ :|:& };:
+	regexp.MustCompile(`>\s*/dev/(sd|nvme|disk)`),                                                        // write to raw disk
 }
 
 // safeCommands are leading tokens that are inert: they read, filter, or format,

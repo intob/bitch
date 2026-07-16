@@ -81,6 +81,14 @@ CREATE INDEX IF NOT EXISTS idx_sessions_claude ON sessions(claude_session_id);
 CREATE TABLE IF NOT EXISTS spend (
     day INTEGER NOT NULL PRIMARY KEY, -- days since epoch, UTC
     usd REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS secrets (
+    name        TEXT NOT NULL PRIMARY KEY, -- env-var name (validated, see secrets.go)
+    value       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)

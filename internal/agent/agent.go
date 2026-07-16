@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/intob/bitch/internal/config"
+	"github.com/intob/bitch/internal/store"
 )
 
 // Runner spawns Claude Code processes. One Runner is shared across all chats.
@@ -56,6 +57,13 @@ type RunRequest struct {
 	ClaudeSessionID string // empty ⇒ start a fresh session with a new UUID
 	Model           string // empty ⇒ config default (§9.1)
 	Effort          string // empty ⇒ config default (§9.1)
+
+	// Credential vault (PLAN-CREDENTIALS.md §4.3). Secrets are injected as env
+	// vars into the scrubbed child so a later task doesn't re-ask; Manifest is a
+	// names+descriptions preamble (never values) prepended to the prompt so the
+	// agent knows which vars exist. The bridge fills both from the store.
+	Secrets  map[string]string
+	Manifest string
 }
 
 // Result is the outcome of a completed turn (from the terminal `result` event).
@@ -119,11 +127,16 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = req.WorkDir
-	cmd.Env = r.childEnv()
+	cmd.Env = r.childEnv(req.Secrets)
 	// Feed the prompt on stdin, not as a trailing positional arg: --add-dir is
 	// variadic and would swallow a positional prompt, and stdin is also immune
-	// to prompts that begin with '-'.
-	cmd.Stdin = strings.NewReader(req.Prompt)
+	// to prompts that begin with '-'. Prepend the credential manifest (§4.3) so
+	// the agent knows which env vars hold stored secrets.
+	prompt := req.Prompt
+	if m := strings.TrimSpace(req.Manifest); m != "" {
+		prompt = m + "\n\n" + prompt
+	}
+	cmd.Stdin = strings.NewReader(prompt)
 	// Put claude in its own process group and kill the whole group on cancel:
 	// tool children (test runs, builds) must die with it, or /stop leaves them
 	// running as root (§6). WaitDelay unblocks Wait if a straggler holds the
@@ -249,7 +262,14 @@ func (r *Runner) Preflight(ctx context.Context) (string, error) {
 // — BITCH_TELEGRAM_TOKEN above all (a safe-listed `env` would print them into
 // the transcript, §4.6). The child gets: base process vars, ANTHROPIC_*/
 // CLAUDE_* for auth and CLI config, and the hook callback endpoint.
-func (r *Runner) childEnv() []string {
+//
+// secrets are the credential vault (PLAN-CREDENTIALS.md §4.3), injected as env
+// vars so tools the agent runs can use them without re-asking. Each name is
+// re-validated here (defense in depth): a value that reached the DB out-of-band
+// must not inject a code-loading var (LD_PRELOAD, BASH_ENV, …) or shadow a
+// base/hook var. Be honest about the posture — an injected value is readable by
+// any shell the agent runs; this is a convenience store, not a confidential one.
+func (r *Runner) childEnv(secrets map[string]string) []string {
 	env := []string{
 		"BITCH_HOOK_ADDR=" + r.cfg.HookAddr,
 		"BITCH_HOOK_SECRET=" + r.cfg.HookSecret,
@@ -267,6 +287,12 @@ func (r *Runner) childEnv() []string {
 		if base[k] || strings.HasPrefix(k, "ANTHROPIC_") || strings.HasPrefix(k, "CLAUDE_") {
 			env = append(env, kv)
 		}
+	}
+	for name, value := range secrets {
+		if store.ValidSecretName(name) != nil {
+			continue // never inject a name that isn't provably safe
+		}
+		env = append(env, name+"="+value)
 	}
 	return env
 }

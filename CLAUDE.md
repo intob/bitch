@@ -73,9 +73,24 @@ command string on purpose (they catch badness inside arguments); remember
 compare unresolved paths against roots.
 
 **The claude child env is built from scratch** (`agent.childEnv`): base vars +
-`ANTHROPIC_*`/`CLAUDE_*` + the two hook vars. Never pass `os.Environ()` — the
-bridge env holds `BITCH_TELEGRAM_TOKEN`, and a safe-listed command must never
-be able to print it (there's a test asserting this).
+`ANTHROPIC_*`/`CLAUDE_*` + the two hook vars + the credential vault (§4.7). Never
+pass `os.Environ()` — the bridge env holds `BITCH_TELEGRAM_TOKEN`, and a
+safe-listed command must never be able to print it (there's a test asserting
+this). Vault secrets are the one *curated* addition: every injected name is
+re-checked through `store.ValidSecretName` at injection time, because a name
+becomes an env var in the root child — a saved `LD_PRELOAD`/`BASH_ENV`/`PATH`
+would be code-exec or a hijack. That validator (denylist of code-loading and
+reserved names) is security-critical; keep it strict, and keep the re-check in
+`childEnv` even though save-time also validates (defense in depth).
+
+**The credential vault is a convenience store, not a confidential one** (§4.7).
+Stored secrets are injected as env vars so a later task doesn't re-ask — but an
+env var is readable by any shell the agent runs (`echo $X`), so treat every
+stored credential as agent-readable and workdir-code-reachable; the disposable
+box is the backstop, not the gate. It lives in a **separate** SQLite DB at the
+fixed, non-configurable `/etc/bitch/secrets.db` (a movable path would escape the
+static `/etc/bitch` deny and fail open). Never add a path that returns a value
+back to the agent (no `secret_get`).
 
 **The CLI is pinned and version-coupled.** `CLAUDE_VERSION` in
 `deploy/setup.sh` (currently 2.1.210) must match what the code was tested
@@ -121,8 +136,9 @@ Session field, thread it through all three store queries (`Get`,
   the same commit when behavior diverges from it.
 - `internal/policy` stays dependency-free and testable (its only impurity is
   symlink resolution); the bridge passes `config.WithinRoots` in as a closure.
-- Secrets only ever come from the environment (`config.Load`); nothing else
-  reads `os.Getenv`.
+- Secrets come from the environment (`config.Load`) and, at runtime, the
+  credential vault (`internal/store/secrets.go`, §4.7); nothing else reads
+  `os.Getenv`.
 - Table-driven tests; security behavior gets a test per rule (see
   `policy_test.go` for the pattern).
 

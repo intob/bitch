@@ -42,7 +42,17 @@ type Config struct {
 	HookSecret string // BITCH_HOOK_SECRET — shared secret gating the loopback server; auto-generated if empty.
 	DBPath     string // BITCH_DB_PATH — SQLite session store path (§6).
 	StateDir   string // BITCH_STATE_DIR — scratch dir for per-run settings.json files.
+
+	// SecretsPath is the credential vault DB (PLAN-CREDENTIALS.md §4.2). It is
+	// deliberately NOT env-configurable: the policy deny that keeps the agent from
+	// reading it is a static /etc/bitch literal (policy.go), so a movable path
+	// would fail open. Overridable only in tests, via SecretsPathForTest.
+	SecretsPath string
 }
+
+// DefaultSecretsPath is the fixed vault location. It sits under /etc/bitch, which
+// the policy gate already denies the agent from reading (§4.5/§4.7).
+const DefaultSecretsPath = "/etc/bitch/secrets.db"
 
 // Load reads configuration from the environment, applies defaults, and
 // validates. It fails fast: a misconfigured security-critical value should stop
@@ -58,6 +68,7 @@ func Load() (*Config, error) {
 		HookSecret:      os.Getenv("BITCH_HOOK_SECRET"),
 		DBPath:          envOr("BITCH_DB_PATH", "data/bitch.sqlite"),
 		StateDir:        envOr("BITCH_STATE_DIR", "data/state"),
+		SecretsPath:     DefaultSecretsPath, // fixed by design; see the field comment
 		DailyBudgetUSD:  envFloat("BITCH_DAILY_BUDGET_USD", 20),
 		DefaultTier:     int(envInt("BITCH_DEFAULT_TIER", 1)),
 		ApprovalTimeout: time.Duration(envInt("BITCH_APPROVAL_TIMEOUT", 300)) * time.Second,

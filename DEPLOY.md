@@ -119,7 +119,14 @@ Tooling: `curl` against the Hetzner REST API (`https://api.hetzner.cloud/v1`), o
    `/root/.git-credentials` (mode 600) as
    `https://x-access-token:<PAT>@github.com`. `contents:read` clones/pulls;
    add `contents:write` only for pushes (still gated). The policy denylist blocks
-   the agent from reading `.git-credentials`.
+   the agent from reading `.git-credentials`. This is the first instance of a
+   general pattern — the runtime **credential vault** (§4.7) does the same for
+   arbitrary API keys: the bridge auto-creates `/etc/bitch/secrets.db` on first
+   boot (no setup step), and the user stores keys live with `/secrets set NAME
+   value`. Caveat to know before storing anything: vault secrets are injected as
+   env vars and are therefore **agent-readable** (unlike the PAT, which stays in a
+   deny-listed file git reads directly) — store only what you can tolerate on an
+   agent-readable box; the disposable-box model is the backstop.
 9. **Start + verify**
    - `systemctl enable --now bitch`; `journalctl -u bitch -f`.
    - Confirm the startup log line ("bitch online as @… ; N allowed user(s)…").

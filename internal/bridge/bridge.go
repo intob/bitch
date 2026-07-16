@@ -23,12 +23,13 @@ import (
 
 // Bridge wires Telegram, the session store, and the Claude Code runner together.
 type Bridge struct {
-	cfg    *config.Config
-	store  *store.Store
-	bot    *tgbotapi.BotAPI
-	sender *tg.Sender
-	runner *agent.Runner
-	botID  int64
+	cfg     *config.Config
+	store   *store.Store
+	secrets *store.Store // the credential vault, a separate DB at cfg.SecretsPath (§4.7)
+	bot     *tgbotapi.BotAPI
+	sender  *tg.Sender
+	runner  *agent.Runner
+	botID   int64
 
 	mu      sync.Mutex
 	runs    map[store.Key]*activeRun    // in-flight agent turns, one per chat
@@ -54,9 +55,16 @@ func New(cfg *config.Config, st *store.Store, exe string) (*Bridge, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The credential vault is a separate DB at a fixed, deny-listed path (§4.7);
+	// keeping it out of the session DB is what lets one static deny term cover it.
+	secrets, err := store.Open(cfg.SecretsPath)
+	if err != nil {
+		return nil, fmt.Errorf("bridge: open secrets vault %s: %w", cfg.SecretsPath, err)
+	}
 	return &Bridge{
 		cfg:     cfg,
 		store:   st,
+		secrets: secrets,
 		bot:     bot,
 		sender:  tg.NewSender(bot),
 		runner:  runner,
@@ -225,12 +233,19 @@ func (b *Bridge) handleAgentTurn(ctx context.Context, msg *tgbotapi.Message, key
 		OnThinking: func() { status.Set("💭 thinking…") },
 	}
 
+	// Credential vault (§4.7): inject stored secrets as env vars and tell the
+	// agent which vars exist so it doesn't re-ask. A vault error is non-fatal —
+	// fail-closed means inject nothing and let the agent ask, not abort the turn.
+	secretVals, manifest := b.vaultForTurn()
+
 	runReq := agent.RunRequest{
 		Prompt:          prompt,
 		WorkDir:         sess.WorkDir,
 		ClaudeSessionID: sess.ClaudeSessionID,
 		Model:           sess.Model,
 		Effort:          sess.Effort,
+		Secrets:         secretVals,
+		Manifest:        manifest,
 	}
 	res, err := b.runner.Run(runCtx, runReq, cb)
 

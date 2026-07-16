@@ -45,6 +45,8 @@ func (b *Bridge) handleCommand(msg *tgbotapi.Message, key store.Key, text string
 		b.cmdEffort(msg, key, arg)
 	case "/cd":
 		b.cmdCd(msg, key, arg)
+	case "/secrets", "/secret":
+		b.cmdSecrets(msg, arg)
 	case "/status":
 		b.cmdStatus(msg, key)
 	default:
@@ -59,6 +61,7 @@ const helpText = `bitch — commands:
 /model <name> — set model (opus|sonnet|haiku|fable or a claude-… id; "default" to reset)
 /effort <level> — set effort (low|medium|high|xhigh|max; "default" to reset)
 /stop — cancel the current turn
+/secrets — list stored credentials; /secrets set NAME value to store one, /secrets rm NAME to delete
 /status — session, dir, tier, model, effort, today's spend
 Anything else is sent to the agent.`
 
@@ -320,6 +323,13 @@ func (b *Bridge) handleCallback(cb *tgbotapi.CallbackQuery) {
 		b.sender.AnswerCallback(cb.ID, "cancelled")
 		if cb.Message != nil {
 			b.sender.ResolveApproval(cb.Message.Chat.ID, cb.Message.MessageID, "tier change cancelled.")
+		}
+	case strings.HasPrefix(data, "secretrm:"):
+		b.confirmSecretRmCallback(cb, data)
+	case data == "secretrmx":
+		b.sender.AnswerCallback(cb.ID, "cancelled")
+		if cb.Message != nil {
+			b.sender.ResolveApproval(cb.Message.Chat.ID, cb.Message.MessageID, "deletion cancelled.")
 		}
 	default:
 		b.sender.AnswerCallback(cb.ID, "")

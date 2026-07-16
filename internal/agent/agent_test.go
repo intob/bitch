@@ -89,13 +89,22 @@ func TestChildEnv(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SOMETHING", "yes")
 
 	r := &Runner{cfg: &config.Config{HookAddr: "127.0.0.1:1", HookSecret: "hs"}}
-	env := r.childEnv()
+	// Vault secrets (PLAN-CREDENTIALS.md §4.3): a valid one is injected; names
+	// that would shadow a base var or load code are refused at injection time
+	// even if they somehow reached the map.
+	env := r.childEnv(map[string]string{
+		"GITHUB_TOKEN": "ghp_abc",
+		"LD_PRELOAD":   "/tmp/evil.so",
+		"PATH":         "/pwn",
+		"BASH_ENV":     "/tmp/rc",
+	})
 
 	for _, want := range []string{
 		"ANTHROPIC_API_KEY=sk-ant-test",
 		"CLAUDE_CODE_SOMETHING=yes",
 		"BITCH_HOOK_ADDR=127.0.0.1:1",
 		"BITCH_HOOK_SECRET=hs",
+		"GITHUB_TOKEN=ghp_abc",
 	} {
 		if !slices.Contains(env, want) {
 			t.Errorf("child env missing %q", want)
@@ -104,6 +113,9 @@ func TestChildEnv(t *testing.T) {
 	for _, e := range env {
 		if strings.HasPrefix(e, "BITCH_TELEGRAM_TOKEN=") || strings.HasPrefix(e, "BITCH_ALLOWED_USERS=") {
 			t.Errorf("bridge secret leaked into child env: %s", e)
+		}
+		if strings.HasPrefix(e, "LD_PRELOAD=") || strings.HasPrefix(e, "BASH_ENV=") || e == "PATH=/pwn" {
+			t.Errorf("dangerous secret name reached child env: %s", e)
 		}
 	}
 }

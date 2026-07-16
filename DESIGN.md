@@ -206,6 +206,39 @@ carry the weight** — treat these as load-bearing, not optional:
 - **Disposable box** (§4.5) — rebuild on any suspicion; keep nothing on it that
   isn't reproducible from a script.
 
+### 4.7 Credential vault — provide a credential once, reuse it later
+When a task needs a credential the agent doesn't have (API key, service token), it
+asks over Telegram; storing it means a *later, unrelated* task in a fresh session
+doesn't have to ask again. This generalizes the git-PAT pattern (§4.5) from a
+provisioning-time file to a runtime store. Design (PLAN-CREDENTIALS.md is the
+detailed plan; `internal/store/secrets.go`, `internal/bridge/secrets.go`):
+
+- **Storage:** a *separate* SQLite DB at the fixed path `/etc/bitch/secrets.db`.
+  The path is **not** configurable: the policy deny that stops the agent reading it
+  is a static `/etc/bitch` literal, so a movable path would fail open. `/etc/bitch`
+  is outside both the workdir jail and `/opt/bitch`, so the Read tool denies it and
+  `cat /etc/bitch/secrets.db` hits the deny pattern.
+- **Reuse:** stored secrets are injected as env vars into the scrubbed claude child
+  (`agent.childEnv`), and a names+descriptions *manifest* (never values) is
+  prepended to the prompt so the agent knows which vars exist and stops re-asking.
+- **Name safety is a hard boundary.** A stored name becomes an env var in a **root**
+  child, so `store.ValidSecretName` refuses anything that can redirect code loading
+  (`LD_*`, `BASH_ENV`, `*PATH`, `*_OPTIONS`, `GIT_SSH_COMMAND`, …) or shadow a
+  base/hook/`ANTHROPIC_*`/`CLAUDE_*` var. Enforced at save **and** at injection.
+- **Honest posture — it is a convenience store, not a confidential one.** Once a
+  value is in the child env, any shell the agent runs reads it (`echo $X`,
+  `cat /proc/self/environ`) — you cannot keep an env var secret from a shell, and
+  those reads auto-allow at T1+. So every stored credential is agent-readable and
+  reachable by workdir code, and the egress firewall does **not** contain HTTPS
+  exfil (egress allows 443 outbound). The **disposable box** is the real backstop:
+  store only what you can tolerate on an agent-readable box, and rebuild on
+  suspicion. There is deliberately **no** value-returning path back to the agent
+  (no `secret_get`) — the loopback shared secret is in the child env, so such a
+  path would be an unauthenticated vault read from inside the sandbox.
+- **v1 capture is manual** (`/secrets set NAME value`, which self-deletes the
+  plaintext message); a seamless agent-driven MCP capture tool is deferred because
+  it is CLI-version-coupled and only live-testable.
+
 ---
 
 ## 5. The host: Hetzner VPS (always-on)
