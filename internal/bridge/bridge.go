@@ -31,6 +31,7 @@ type Bridge struct {
 	bot     *tgbotapi.BotAPI
 	sender  *tg.Sender
 	runner  *agent.Runner
+	media   *media // inbound attachment downloads (§7)
 	botID   int64
 
 	mu      sync.Mutex
@@ -134,6 +135,7 @@ func New(cfg *config.Config, st *store.Store, exe string) (*Bridge, error) {
 		bot:     bot,
 		sender:  tg.NewSender(bot),
 		runner:  runner,
+		media:   newMedia(bot, cfg.MediaDir),
 		botID:   bot.Self.ID,
 		runs:    make(map[store.Key]*activeRun),
 		pending: make(map[string]*pendingApproval),
@@ -161,6 +163,14 @@ func (b *Bridge) Run(ctx context.Context) error {
 		return fmt.Errorf("bridge: approval server listen %s: %w", b.cfg.HookAddr, err)
 	}
 	go b.serveApprovals(ctx, ln)
+
+	// The media root is cache, not archive (§7). Best-effort — housekeeping must
+	// never fail a boot.
+	if n, err := pruneMedia(b.cfg.MediaDir, mediaRetention); err != nil {
+		log.Printf("media prune: %v", err)
+	} else if n > 0 {
+		log.Printf("media prune: removed %d file(s) older than %s", n, mediaRetention)
+	}
 
 	// Boot notice to the human (§8): confirms a deploy (or crash restart —
 	// systemd restarts land here too, which is a signal worth having) came back
@@ -208,11 +218,15 @@ func (b *Bridge) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		}
 		return
 	}
+	key := b.keyFor(msg)
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
+		// Not text: an attachment becomes a turn, anything else gets an honest
+		// refusal. Past the user-ID gate nothing is dropped in silence — a
+		// screenshot that vanishes reads as the bot being broken (§7).
+		b.handleNonText(ctx, msg, key)
 		return
 	}
-	key := b.keyFor(msg)
 	if strings.HasPrefix(text, "/") {
 		b.handleCommand(msg, key, text)
 		return
@@ -223,6 +237,40 @@ func (b *Bridge) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// synchronous — they are fast. The b.runs busy-gate below keeps it to one
 	// turn per chat.
 	go b.handleAgentTurn(ctx, msg, key, text)
+}
+
+// handleNonText routes a message with no text body (§7). Photos and documents
+// download and become a turn; the rest gets told why it can't. Service messages
+// (joins, pins) fall through the default arm — harmless noise in a 1:1 chat, and
+// the alternative is enumerating a moving target of message types.
+func (b *Bridge) handleNonText(ctx context.Context, msg *tgbotapi.Message, key store.Key) {
+	switch {
+	case len(msg.Photo) > 0 || msg.Document != nil:
+		// The download runs in the turn goroutine, not the poll loop: it's a
+		// network fetch of up to 20 MB and the loop must keep draining updates.
+		go b.handleMediaTurn(ctx, msg, key)
+	case msg.Voice != nil || msg.VideoNote != nil || msg.Audio != nil:
+		b.reply(msg.Chat.ID, "🎤 voice isn't supported yet — text, images, or files.")
+	default:
+		b.reply(msg.Chat.ID, "I can only handle text, images, and files.")
+	}
+}
+
+// handleMediaTurn downloads the attachment and runs the turn it becomes. The
+// acknowledgment goes out before the fetch: the download is latency the user
+// would otherwise read as silence.
+func (b *Bridge) handleMediaTurn(ctx context.Context, msg *tgbotapi.Message, key store.Key) {
+	chatID := msg.Chat.ID
+	b.reply(chatID, "📥 downloading…")
+	prompt, err := b.media.fetch(chatID, msg)
+	if err != nil {
+		// Fail closed: no turn starts, so the agent never gets a prompt pointing
+		// at a file that isn't there.
+		log.Printf("media download (chat %d): %v", chatID, err)
+		b.reply(chatID, "⚠️ couldn't fetch that file: "+err.Error())
+		return
+	}
+	b.handleAgentTurn(ctx, msg, key, prompt)
 }
 
 // keyFor builds the group-ready session key. ThreadID is 0 for 1:1 chats; forum
@@ -378,6 +426,7 @@ func (b *Bridge) runTurn(runCtx context.Context, key store.Key, chatID int64, pr
 		Prompt:          prompt,
 		WorkDir:         sess.WorkDir,
 		ClaudeSessionID: sess.ClaudeSessionID,
+		MediaDir:        b.cfg.MediaDir,
 		Model:           sess.Model,
 		Effort:          sess.Effort,
 		Secrets:         secretVals,

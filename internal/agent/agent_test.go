@@ -143,3 +143,50 @@ func TestChildEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestRunAddDirs drives a real Run against a stub CLI that records its argv.
+// The media root only works if it reaches the child as its own --add-dir: the
+// hook jails each call, but without the flag Claude Code won't range into the
+// dir at all and a photo prompt points at a file it refuses to read (§7).
+func TestRunAddDirs(t *testing.T) {
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	stub := filepath.Join(dir, "claude")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s\n"+
+		`echo '{"type":"result","subtype":"success","session_id":"s1","result":"ok"}'`+"\n", argv)
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(&config.Config{StateDir: filepath.Join(dir, "state"), ClaudeBin: stub}, "/opt/bitch/bitch")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	work, media := t.TempDir(), t.TempDir()
+	if _, err := r.Run(t.Context(), RunRequest{Prompt: "hi", WorkDir: work, MediaDir: media}, Callbacks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(raw)), "\n")
+
+	for _, want := range []string{work, media} {
+		i := slices.Index(args, want)
+		if i < 1 || args[i-1] != "--add-dir" {
+			t.Errorf("%q not passed as --add-dir; argv = %v", want, args)
+		}
+	}
+
+	// Absent a media root the flag must not appear at all — an empty --add-dir
+	// would be the workdir's parent as far as the CLI is concerned.
+	if _, err := r.Run(t.Context(), RunRequest{Prompt: "hi", WorkDir: work}, Callbacks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw, _ = os.ReadFile(argv)
+	args = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if n := strings.Count(strings.Join(args, "\n"), "--add-dir"); n != 1 {
+		t.Errorf("want exactly one --add-dir without a media root, got %d; argv = %v", n, args)
+	}
+}

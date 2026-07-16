@@ -1,9 +1,19 @@
 # PLAN 2 — inbound media: images & documents
 
-Status: **proposal, not yet implemented.** Build order: **2 of 6** — the
+Status: **done (2026-07-16).** Build order: **2 of 6** — the
 biggest UX unlock for a phone-driven agent. Voice is deliberately **not**
 here; it is PLAN-6-VOICE.md (sequenced last). Authority for intent is
 `DESIGN.md`; read alongside `CLAUDE.md` (invariants).
+
+Landed as designed: the derived+canonicalized `config.MediaDir` appended to the
+jail roots, `internal/bridge/media.go` (download, bridge-side filenames, prompt
+construction, boot prune), the `handleMessage` dispatch table, and
+`RunRequest.MediaDir` as a second `--add-dir`. Two deviations worth knowing:
+filenames carry four random hex after the timestamp (`img-<ts>-<rand>.jpg`),
+because an album's updates share a second and `O_EXCL` would fail the second
+file; and the 20 MB cap is enforced **twice** — before the fetch from Telegram's
+reported `FileSize`, and again as a `LimitReader` on the copy, since the
+reported size is a hint and only the copy is a guarantee.
 
 ## 1. The ask
 

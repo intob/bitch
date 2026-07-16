@@ -65,6 +65,10 @@ type RunRequest struct {
 	Model           string // empty ⇒ config default (§9.1)
 	Effort          string // empty ⇒ config default (§9.1)
 
+	// MediaDir is the inbound-attachment root (§7); when set it gets its own
+	// --add-dir so a prompt referencing a downloaded file is readable.
+	MediaDir string
+
 	// Credential vault (PLAN-CREDENTIALS.md §4.3). Secrets are injected as env
 	// vars into the scrubbed child so a later task doesn't re-ask; Manifest is a
 	// names+descriptions preamble (never values) prepended to the prompt so the
@@ -153,6 +157,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, cb Callbacks) (*Result
 	// Confine tool access to the session workspace (§4.3). The hook enforces the
 	// jail per-call; --add-dir keeps Claude Code from ranging wider on its own.
 	args = append(args, "--add-dir", req.WorkDir)
+	if req.MediaDir != "" {
+		args = append(args, "--add-dir", req.MediaDir)
+	}
 	args = append(args, r.cfg.ClaudeExtraArgs...)
 
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)

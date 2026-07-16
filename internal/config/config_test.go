@@ -17,6 +17,8 @@ func setValid(t *testing.T) string {
 	t.Setenv("BITCH_ALLOWED_USERS", "42")
 	t.Setenv("BITCH_ROOTS", root)
 	t.Setenv("BITCH_DEFAULT_DIR", "")
+	// Load creates the media dir under StateDir; keep that out of the package dir.
+	t.Setenv("BITCH_STATE_DIR", t.TempDir())
 	return root
 }
 
@@ -77,6 +79,94 @@ func TestWithinRoots(t *testing.T) {
 		if got := c.WithinRoots(tc.path); got != tc.want {
 			t.Errorf("WithinRoots(%q) = %v, want %v", tc.path, got, tc.want)
 		}
+	}
+}
+
+// The media root must exist, be private, and be reachable through the jail —
+// otherwise the agent can't Read what the user just sent (§7).
+func TestMediaDirInJail(t *testing.T) {
+	setValid(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(c.MediaDir)
+	if err != nil {
+		t.Fatalf("media dir not created: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("media dir mode = %o, want 700", perm)
+	}
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"the root itself", c.MediaDir, true},
+		{"a download", filepath.Join(c.MediaDir, "42", "img-20260716-150405-ab12.jpg"), true},
+		{"escape by traversal", filepath.Dir(c.MediaDir), false},
+		{"a sibling sharing the prefix", c.MediaDir + "-evil", false},
+	}
+	for _, tc := range cases {
+		// The jail compares physical paths, so a traversal is cleaned first —
+		// as policy.resolve does before calling WithinRoots (§4.3).
+		if got := c.WithinRoots(filepath.Clean(tc.path)); got != tc.want {
+			t.Errorf("%s: WithinRoots(%q) = %v, want %v", tc.name, tc.path, got, tc.want)
+		}
+	}
+}
+
+// A media root reached through a symlinked StateDir must be stored resolved:
+// the jail compares physical paths, so an unresolved root would never match
+// what policy.resolve produces (§4.3).
+func TestMediaDirSymlinkCanonicalized(t *testing.T) {
+	setValid(t)
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(tmp, "state")
+	link := filepath.Join(tmp, "state-link")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BITCH_STATE_DIR", link)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(real, "media")
+	if c.MediaDir != want {
+		t.Errorf("MediaDir = %q, want resolved %q", c.MediaDir, want)
+	}
+	if !c.WithinRoots(want) {
+		t.Errorf("resolved media path %q is not within roots %v", want, c.Roots)
+	}
+}
+
+// A missing BITCH_ROOTS must still fail closed even though initMediaDir appends
+// a root of its own — the media root must never stand in for the jail.
+func TestMediaDirDoesNotMaskMissingRoots(t *testing.T) {
+	setValid(t)
+	t.Setenv("BITCH_ROOTS", "")
+	if _, err := Load(); err == nil {
+		t.Error("Load succeeded with no BITCH_ROOTS")
+	}
+}
+
+// A media root already inside a configured root must not be appended twice.
+func TestMediaDirNotDuplicatedInRoots(t *testing.T) {
+	root := setValid(t)
+	t.Setenv("BITCH_STATE_DIR", filepath.Join(root, "state"))
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Roots) != 1 {
+		t.Errorf("Roots = %v, want just the configured root", c.Roots)
 	}
 }
 

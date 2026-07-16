@@ -147,6 +147,20 @@ unmaintained and does not retry 429s — the retry/throttle layers compensate;
 don't remove them. Forum topics aren't supported by this lib version, so
 `ThreadID` is always 0 (keying is already group-ready).
 
+**Inbound media is bridge-named and jailed** (§7, PLAN-2-MEDIA-IN.md).
+Attachments land in `config.MediaDir` (`<StateDir>/media/<chatID>/`) — derived,
+not env-configurable, canonicalized and appended to the roots in `config.Load`
+(after `validate`, or it would mask a missing `BITCH_ROOTS`), and passed as a
+second `--add-dir`. Two rules carry it: Telegram's `Document.FileName` is
+sender-controlled and must **never** reach a path (`mediaFilename` generates
+the name; `safeExt`/`safeName` are the only things that touch the sender's
+string, and only for an extension or prompt context); and the 20 MB cap is
+enforced both before the fetch and as a `LimitReader` on the copy, because
+`FileSize` is a hint. A failed download starts **no** turn. `GetFileDirectURL`
+returns a URL with the bot token in it — bridge-side only, never logged, never
+in a prompt. Past the user-ID gate no message is silently dropped; unlisted
+users still are (§4.1).
+
 **One turn per chat** via the `b.runs` map; a prompt arriving while busy is
 **queued** (bounded 10 / 8 kB; overflow still gets "still working") and drained
 into the next turn by the loop in `handleAgentTurn`. The ownership rule: the

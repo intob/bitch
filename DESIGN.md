@@ -334,6 +334,23 @@ works regardless of where you (or the laptop) are.
   forgiving for arbitrary agent output than MarkdownV2.
 - **Big artifacts** (long diffs, files, logs) → send as a **document attachment**.
 - Approval prompts (§4.3) use **inline keyboard buttons** (✅/❌).
+- **Inbound media:** a photo or document from an allowlisted user becomes an
+  ordinary turn — the caption is the prompt (or a describe-it default when
+  there's none), and the file is downloaded to `<BITCH_STATE_DIR>/media/<chat>/`
+  and named in the prompt for the Read tool, which renders images natively. The
+  media root is derived, canonicalized, and appended to the jail roots in
+  `config.Load` (§4.3), and passed as a second `--add-dir`; it is deliberately
+  *not* the session workdir, so cloned repos don't collect blobs. It's
+  bridge-owned scratch the agent can also write to — nothing executes from it,
+  and it's pruned at boot past 7 days. Filenames are generated bridge-side
+  (`img-<ts>-<rand>.jpg`): Telegram's `Document.FileName` is sender-controlled,
+  so it never reaches a path, only the prompt as context. 20 MB cap (Telegram's
+  own `getFile` limit), enforced before the fetch *and* during the copy; a
+  failed download starts no turn. Albums (`MediaGroupID`) arrive as separate
+  updates and are each their own turn — later ones queue behind the first (§6).
+  Past the user-ID gate **no message is silently dropped**: voice gets a
+  not-yet note, anything else an honest refusal. Unlisted users stay silent
+  (§4.1).
 
 ---
 

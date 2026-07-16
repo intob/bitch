@@ -43,6 +43,13 @@ type Config struct {
 	DBPath     string // BITCH_DB_PATH — SQLite session store path (§6).
 	StateDir   string // BITCH_STATE_DIR — scratch dir for per-run settings.json files.
 
+	// MediaDir is where inbound Telegram attachments land (§7, PLAN-2 §2) —
+	// bridge-owned scratch, never the session workdir. Derived from StateDir and
+	// appended to Roots so the agent's Read tool can reach it through the jail;
+	// deliberately not env-configurable, since a separate knob would be one more
+	// path to reason about against the roots.
+	MediaDir string
+
 	// SecretsPath is the credential vault DB (PLAN-CREDENTIALS.md §4.2). It is
 	// deliberately NOT env-configurable: the policy deny that keeps the agent from
 	// reading it is a static /etc/bitch literal (policy.go), so a movable path
@@ -104,7 +111,35 @@ func Load() (*Config, error) {
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
+	// After validate: initMediaDir appends to Roots, which would otherwise mask a
+	// missing BITCH_ROOTS.
+	if err := c.initMediaDir(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// initMediaDir derives, creates, and canonicalizes the media root, then adds it
+// to the jail roots (§4.3) so the agent can Read what the user sent. It is
+// resolved after creation because the jail compares physical paths and StateDir
+// may sit behind a symlink.
+func (c *Config) initMediaDir() error {
+	abs, err := filepath.Abs(filepath.Join(c.StateDir, "media"))
+	if err != nil {
+		return fmt.Errorf("media dir: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return fmt.Errorf("media dir: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	c.MediaDir = abs
+	if !c.WithinRoots(abs) {
+		c.Roots = append(c.Roots, abs)
+	}
+	return nil
 }
 
 func (c *Config) validate() error {
