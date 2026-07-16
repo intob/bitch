@@ -1,8 +1,15 @@
 # PLAN — persistent credential store ("provide it once")
 
-Status: **proposal, not yet implemented.** Authority for intent is `DESIGN.md`;
-this doc plans an addition to it. Read alongside `CLAUDE.md` (invariants) and the
+Status: **implemented, 2026-07-16** — see DESIGN.md §4.7, which is now the
+authority; this doc is kept as the rationale record. Landed as two commits: the
+vault itself (`1e51046`) and the non-secret facts sibling (`94215d0`) that keeps
+ordinary recall out of it. Read alongside `CLAUDE.md` (invariants) and the
 git-PAT precedent (commit `4489786`).
+
+Shipped with the three non-negotiables below intact: the store is framed as
+agent-readable convenience, `ValidSecretName` is an exec-affecting-var denylist,
+and the DB path is the hardcoded `/etc/bitch/secrets.db`. `secret_get` does not
+exist and must not.
 
 > **Revised after a Fable high-effort security review.** Three corrections are
 > baked into the sections below and are non-negotiable for v1:
