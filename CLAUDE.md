@@ -1,9 +1,11 @@
 # CLAUDE.md — working on bitch
 
 bitch is a Go bridge between Telegram and the Claude Code CLI: one always-on
-agent on a Hetzner VPS, driven from a phone, with a tiered permission gate that
+agent on any always-on Linux box, driven from a phone, with a tiered permission gate that
 asks the human over Telegram before risky operations. `DESIGN.md` is the
-authority on intent; `DEPLOY.md` is the provisioning runbook; `CODE-REVIEW.md`
+authority on intent; `README.md` is the user-facing install guide (keep it in
+sync when setup, env vars, or commands change); `DEPLOY.md` is one worked
+provisioning run, kept as an example; `CODE-REVIEW.md`
 records the 2026-07-16 review and what was fixed.
 
 ## Commands
@@ -12,19 +14,28 @@ records the 2026-07-16 review and what was fixed.
 go build ./cmd/bitch     # build the single binary (serve + hook + mcp subcommands)
 go test ./...            # unit tests — must stay green
 go vet ./...             # clean
-./deploy/redeploy.sh     # ship a code change to the live box (build+scp+restart+verify+rollback)
+./deploy/redeploy.sh     # ship a code change to a deployed box (build+scp+restart+verify+rollback)
 ```
 
-Redeploy is binary-copy, not `git pull`: the box's `/root/bitch` is a plain
-source tree, so `redeploy.sh` cross-compiles here and ships `/opt/bitch/bitch`.
+Redeploy is binary-copy, not `git pull`: the box's `/root/bitch` is only the
+source `setup.sh` built from, so `redeploy.sh` cross-compiles here and ships `/opt/bitch/bitch`.
 Re-run `deploy/setup.sh` instead when the systemd unit, env schema, or CLI pin
-changes. The box's address lives in the gitignored `deploy/redeploy.local`
-(`BITCH_HOST=…`), never in a tracked file — the repo is public. Don't log individual
+changes. `setup.sh` is also the first-run installer: it collects the token, user
+ID and Anthropic auth (prompt or env var), validates the token via `getMe`, writes
+`/etc/bitch/bitch.env` from `bitch.env.example` (`env_set` rewrites keys in
+place; a placeholder counts as unset — keep `is_unset` in sync with the
+template), and starts the service. It refuses to run without an SSH key in
+root's `authorized_keys`, since it disables root login. New env vars: document
+them in the template, and add them to setup.sh's pass-through list if they're
+common. A deployment's address lives in the gitignored `deploy/redeploy.local`
+(`BITCH_HOST=…`), never in a tracked file — the repo is public and generic, so
+no host, IP, bot handle, or user ID belongs in git (examples use
+`203.0.113.x` / `111111111`). Don't log individual
 deploys anywhere — no "deployed commit" pins, no redeploy history entries.
 
 There is no linter config beyond `go vet`. The module path is
-`github.com/intob/bitch`. The user's global `~/go.work` includes this repo;
-there is no repo-local go.work.
+`github.com/intob/bitch`. There is no repo-local go.work (`go.work` is
+gitignored for developer-local workspaces).
 
 Live testing needs a real bot token + allowlisted user ID (see
 `deploy/bitch.env.example`); unit tests cover everything that doesn't need
@@ -258,7 +269,7 @@ final validator); `/effort` reuses `config.NormalizeEffort`. Neither needs a
 confirm (unlike `/tier`, they don't change the security posture). When adding a
 Session field, thread it through all three store queries (`Get`,
 `GetByClaudeSession`, `Upsert`) and the `CREATE TABLE` **and** an idempotent
-`ALTER TABLE` in `migrate` (existing DBs on the box won't re-run CREATE).
+`ALTER TABLE` in `migrate` (existing deployed DBs won't re-run CREATE).
 
 ## Conventions
 

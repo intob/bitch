@@ -10,7 +10,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Full-root posture is a deliberate, eyes-open choice (§4.6). The compensating
-# controls (permission gate, Hetzner Cloud Firewall egress, disposable box)
+# controls (permission gate, external egress firewall, disposable box)
 # carry the weight — see the design doc.
 User=root
 WorkingDirectory=/opt/bitch

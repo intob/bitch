@@ -1,5 +1,9 @@
 # bitch — Deployment Plan (Hetzner provisioning)
 
+> **This is a worked example of one deployment, not the install guide.** To set
+> up your own, follow the Quick start in [`README.md`](./README.md); `deploy/setup.sh`
+> now prompts for the tokens and starts the service itself.
+
 **Status: DEPLOYED & VERIFIED — 2026-07-16.** The bot is live
 on the box and passed end-to-end verification (answers, `/status`, and the T1
 approval gate resolving instantly both ways). See the deployment record in §0.
