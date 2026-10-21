@@ -1,6 +1,6 @@
 # bitch — Deployment Plan (Hetzner provisioning)
 
-**Status: DEPLOYED & VERIFIED — 2026-07-16.** The bot (@<bot>) is live
+**Status: DEPLOYED & VERIFIED — 2026-07-16.** The bot is live
 on the box and passed end-to-end verification (answers, `/status`, and the T1
 approval gate resolving instantly both ways). See the deployment record in §0.
 **Mode:** Full auto — Claude provisioned everything via the Hetzner Cloud API,
@@ -17,10 +17,10 @@ bridge implemented in this repo.
 | | |
 |---|---|
 | **Box** | `bitch` · **cx33** (Intel x86, 4 vCPU / 8 GB / 80 GB) · **nbg1** (Nuremberg) · Ubuntu 24.04 |
-| **IP** | `<box-ip>` (IPv6 `<box-ipv6>`) |
+| **IP** | `<box-ip>` — kept out of the repo; see `deploy/redeploy.local` (gitignored) |
 | **SSH** | `ssh -i ~/.ssh/bitch_hetzner admin@<box-ip>` (root login disabled; admin has passwordless sudo) |
 | **Auth** | **Max-plan subscription** via `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`); budget guard **off** (`BITCH_DAILY_BUDGET_USD=0`) |
-| **Bot** | @<bot> (id <bot-id>); allowlist = user <user-id> |
+| **Bot** | `<bot>`; allowlist = the owner's Telegram user ID (in `/etc/bitch/bitch.env`) |
 | **Redeploys** | via `deploy/redeploy.sh` — see §0.5 |
 
 **Deviations from the original plan (all deliberate):**
@@ -182,7 +182,7 @@ Done during the 2026-07-16 rollout:
 - [ ] **Verify agent-driven capture live** (§4.7): at T1, paste a throwaway API key and ask the agent to save it → confirm the ✅/❌ approval card shows the value **redacted** → approve → `/new` → check the agent reuses it without re-asking. Also try `/remember email you@example.com`, then a fresh task that needs it. This is the one path unit tests can't cover (it needs a real MCP tool call through the hook).
 - [ ] **Rotate/delete the Hetzner API token** used for provisioning (it was pasted into the chat transcript — most powerful credential; do this first).
 - [ ] Consider rotating the **Telegram bot token** (@BotFather) and **revoking the `claude setup-token` OAuth token** (Anthropic account settings) — both were in the transcript. The agent keeps working; you'd just re-issue and update `/etc/bitch/bitch.env`.
-- [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP `<box-ip>`.
+- [ ] Back up the private key `~/.ssh/bitch_hetzner`; note the box IP in `deploy/redeploy.local`.
 - [ ] Set a **Max usage cap** if you want a spend ceiling (the $/day guard is off under subscription auth).
 - [ ] Optional: wire a scoped Git PAT (fine-grained, never a full-access token) via `git config --global credential.helper store` + `/root/.git-credentials` (mode 600, `https://x-access-token:<PAT>@github.com`), then clone repos under `/srv/work` so the agent has real projects. `contents:read` clones/pulls; `contents:write` for gated pushes. See §4.5 / setup.sh step 2.
 

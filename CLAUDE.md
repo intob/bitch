@@ -18,7 +18,8 @@ go vet ./...             # clean
 Redeploy is binary-copy, not `git pull`: the box's `/root/bitch` is a plain
 source tree, so `redeploy.sh` cross-compiles here and ships `/opt/bitch/bitch`.
 Re-run `deploy/setup.sh` instead when the systemd unit, env schema, or CLI pin
-changes. Deployment specifics (host, key) live in `DEPLOY.md`. Don't log individual
+changes. The box's address lives in the gitignored `deploy/redeploy.local`
+(`BITCH_HOST=…`), never in a tracked file — the repo is public. Don't log individual
 deploys anywhere — no "deployed commit" pins, no redeploy history entries.
 
 There is no linter config beyond `go vet`. The module path is

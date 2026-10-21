@@ -13,12 +13,16 @@
 # Use deploy/setup.sh (re-run) only when the systemd unit, env schema, or system
 # packages change — this script deliberately touches nothing but the binary.
 #
-# Connection details default to the 2026-07-16 deployment (DEPLOY.md §0); override
-# via env for a rebuilt/moved box:
+# Connection details come from env, or from deploy/redeploy.local (gitignored —
+# the live box's address stays out of the public repo), e.g.:
 #   BITCH_HOST=1.2.3.4 BITCH_SSH_USER=admin BITCH_SSH_KEY=~/.ssh/bitch_hetzner ./deploy/redeploy.sh
 set -euo pipefail
 
-HOST="${BITCH_HOST:-<box-ip>}"
+LOCAL="$(dirname "${BASH_SOURCE[0]}")/redeploy.local"
+# shellcheck source=/dev/null
+[[ -f "$LOCAL" ]] && source "$LOCAL"
+
+HOST="${BITCH_HOST:?set BITCH_HOST (or put it in deploy/redeploy.local)}"
 SSH_USER="${BITCH_SSH_USER:-admin}"
 SSH_KEY="${BITCH_SSH_KEY:-$HOME/.ssh/bitch_hetzner}"
 SSH=(ssh -o ConnectTimeout=15 -i "$SSH_KEY" "${SSH_USER}@${HOST}")

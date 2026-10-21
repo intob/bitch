@@ -31,3 +31,6 @@ venv/
 # Go workspace (developer-local)
 go.work
 go.work.sum
+
+# Developer-local deploy target (box address)
+deploy/redeploy.local
